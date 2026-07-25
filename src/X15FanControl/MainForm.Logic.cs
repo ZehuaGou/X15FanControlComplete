@@ -217,52 +217,170 @@ namespace X15FanControl
 
     private void MainTimerTick(object sender, EventArgs e)
         {
-            DateTime now = DateTime.UtcNow;
-            if (_closing || _ec == null)
+            if (_closing) return;
+
+            // 只负责UI刷新：从后台控制循环取最新快照显示
+            FanSnapshot snapshot;
+            ControlDecision decision;
+            int chartInterval = Math.Max(1, _config.ChartSampleIntervalMs / Math.Max(1, _config.UiRefreshIntervalMs));
+
+            lock (_latestLock)
             {
+                snapshot = _latestSnapshot;
+                decision = _latestDecision;
+            }
+            if (snapshot == null) return;
+
+            // 标签始终更新
+            UpdateDashboard(snapshot, decision);
+
+            // 图表降频：只有窗口可见时才添加，且按ChartSampleIntervalMs间隔
+            bool windowVisible = Visible && ShowInTaskbar && !_startMinimizedToTray;
+            if (windowVisible && _chartTickCounter % chartInterval == 0 && decision != null)
+            {
+                AddHistoryPoint("CPU 温度", snapshot.CpuTemperatureC);
+                AddHistoryPoint("GPU 温度", _gpuTelemetryReady ? snapshot.GpuTemperatureC : 0);
+                AddHistoryPoint("CPU 设定", decision.Cpu.AppliedPercent);
+                AddHistoryPoint("GPU 设定", decision.Gpu.AppliedPercent);
+            }
+            _chartTickCounter++;
+        }
+
+        // 启动后台控制循环（替换UI线程中的EC读取和写入）
+        private void StartBackgroundControl()
+        {
+            if (_controlCts != null) return;
+            _controlCts = new System.Threading.CancellationTokenSource();
+            _controlTask = Task.Run(() => ControlLoopAsync(_controlCts.Token));
+        }
+
+        private async Task ControlLoopAsync(CancellationToken token)
+        {
+            while (!token.IsCancellationRequested)
+            {
+                // 防止重入
+                if (Interlocked.Exchange(ref _controlLoopGuard, 1) != 0)
+                {
+                    try { await Task.Delay(100, token); } catch { break; }
+                    continue;
+                }
+
+                try
+                {
+                    if (_closing || _ec == null)
+                    {
+                        try { await Task.Delay(500, token); } catch { break; }
+                        continue;
+                    }
+
+                    DateTime now = DateTime.UtcNow;
+                    FanSnapshot snapshot = ReadSnapshot(now);
+                    DetectSensorStalls(snapshot);
+
+                    ControlDecision decision = null;
+
+                    if (_calibrationActive)
+                    {
+                        // Calibration runs on UI thread via timer; skip here
+                    }
+                    else
+                    {
+                        decision = _engine.Update(snapshot);
+
+                        if (decision.RequestAutoFallback)
+                        {
+                            // 必须回到UI线程执行安全操作
+                            BeginInvoke(new Action(() =>
+                            {
+                                RestoreAuto("控制器请求自动故障保护");
+                                SetRunMode(RunMode.ReadOnly, "传感器故障保护");
+                            }));
+                            try { await Task.Delay(2000, token); } catch { break; }
+                            continue;
+                        }
+
+                        if (_runMode == RunMode.Active)
+                        {
+                            WriteDecision(decision, now);
+                            _heartbeat?.WriteActive(Process.GetCurrentProcess().Id);
+                        }
+
+                        _csvLogger?.Write(snapshot, decision);
+                    }
+
+                    // 安全发布最新快照给UI线程
+                    lock (_latestLock)
+                    {
+                        _latestSnapshot = snapshot;
+                        _latestDecision = decision;
+                        _lastSnapshot = snapshot;
+                    }
+                    _lastTickUtc = now;
+
+                    // 控制频率由 PollIntervalMs 决定
+                    int delayMs = Math.Max(100, Math.Min(2000, _config.PollIntervalMs));
+                    try { await Task.Delay(delayMs, token); } catch { break; }
+                }
+                catch (OperationCanceledException) { break; }
+                catch (Exception ex)
+                {
+                    AppendLog("后台控制循环错误：" + ex.Message);
+                    BeginInvoke(new Action(() =>
+                    {
+                        try { RestoreAuto("控制循环异常"); } catch { }
+                        SetRunMode(RunMode.ReadOnly, "异常故障保护");
+                    }));
+                    try { await Task.Delay(2000, token); } catch { break; }
+                }
+                finally
+                {
+                    Interlocked.Exchange(ref _controlLoopGuard, 0);
+                }
+            }
+
+            Interlocked.Exchange(ref _controlLoopGuard, 0);
+        }
+
+        private void TryAutoActive()
+        {
+            if (_ec == null)
+            {
+                AppendLog("自动Active失败：EC未初始化");
                 return;
             }
 
-            try
+            // 检查冲突进程
+            var conflicts = ConflictDetector.FindConflicts();
+            if (conflicts.Count > 0)
             {
-                FanSnapshot snapshot = ReadSnapshot(now);
-                _lastSnapshot = snapshot;
-
-                // 传感器停滞检测
-                DetectSensorStalls(snapshot);
-
-                if (_calibrationActive)
-                {
-                    CalibrationTick(snapshot);
-                    UpdateDashboard(snapshot, null);
-                    return;
-                }
-
-                ControlDecision decision = _engine.Update(snapshot);
-                if (decision.RequestAutoFallback)
-                {
-                    RestoreAuto("控制器请求自动故障保护");
-                    SetRunMode(RunMode.ReadOnly, "传感器故障保护");
-                    UpdateDashboard(snapshot, decision);
-                    return;
-                }
-
-                if (_runMode == RunMode.Active)
-                {
-                    WriteDecision(decision, now);
-                    _heartbeat?.WriteActive(Process.GetCurrentProcess().Id);
-                }
-
-                UpdateDashboard(snapshot, decision);
-                _csvLogger?.Write(snapshot, decision);
-                _lastTickUtc = now;
+                AppendLog("自动Active失败：检测到冲突进程 " + string.Join(", ", conflicts));
+                return;
             }
-            catch (Exception exception)
+
+            // 检查GPU遥测
+            var telemetry = _gpuTelemetry?.Latest;
+            if (telemetry == null || !telemetry.IsAvailable || telemetry.IsStale)
             {
-                AppendLog("控制循环错误：" + exception);
-                RestoreAuto("控制循环异常");
-                SetRunMode(RunMode.ReadOnly, "异常故障保护");
+                AppendLog("自动Active失败：GPU遥测不可用");
+                return;
             }
+
+            // 检查温度有效性
+            if (telemetry.TemperatureC < 10 || telemetry.TemperatureC > 100)
+            {
+                AppendLog("自动Active失败：GPU温度读数异常 " + telemetry.TemperatureC + "°C");
+                return;
+            }
+
+            // 所有检查通过，切换Active（不弹确认框）
+            _runMode = RunMode.Active;
+            _engine?.Reset();
+            _modeCombo.SelectedItem = _runMode;
+            UpdateModeStatus();
+            FlashModeBadge();
+            _heartbeat?.WriteActive(Process.GetCurrentProcess().Id);
+            StartWatchdog();
+            AppendLog("自动Active模式已启用（--autostart）");
         }
 
         private void DetectSensorStalls(FanSnapshot snapshot)
@@ -819,7 +937,7 @@ namespace X15FanControl
 
             var series = _historyChart.Series[seriesName];
             series.Points.AddY(value);
-            while (series.Points.Count > 300)
+            while (series.Points.Count > 150)
             {
                 series.Points.RemoveAt(0);
             }
@@ -985,9 +1103,10 @@ namespace X15FanControl
             var sb = new StringBuilder();
             string line;
             int count = 0;
+            // 注意：每条日志已自带 Environment.NewLine，不再追加
             while (_logQueue.TryDequeue(out line) && count < 100)
             {
-                sb.AppendLine(line);
+                sb.Append(line);
                 count++;
             }
 
@@ -1009,8 +1128,8 @@ namespace X15FanControl
             // 加入异步日志队列（后台线程批量写入文件）
             _logQueue.Enqueue(DateTime.Now.ToString("O") + "  " + message + Environment.NewLine);
 
-            // UI线程更新文本框（限流，Batch写入）
-            if (_logTextBox != null && !_logTextBox.IsDisposed)
+            // UI线程更新文本框（仅窗口可见时）
+            if (Visible && ShowInTaskbar && _logTextBox != null && !_logTextBox.IsDisposed)
             {
                 try
                 {
@@ -1143,5 +1262,6 @@ namespace X15FanControl
                 _ec = null;
             }
         }
+
     }
 }

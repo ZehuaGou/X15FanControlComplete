@@ -25,6 +25,14 @@ namespace X15FanControl
         private readonly string _watchdogLogPath;
         private readonly System.Windows.Forms.Timer _mainTimer;
 
+        // Background control loop (separate from UI thread)
+        private System.Threading.CancellationTokenSource _controlCts;
+        private Task _controlTask;
+        private FanSnapshot _latestSnapshot;
+        private ControlDecision _latestDecision;
+        private readonly object _latestLock = new object();
+        private int _controlLoopGuard;
+
         private ClevoEcInfo _ec;
         private readonly System.Threading.SemaphoreSlim _ecLock = new System.Threading.SemaphoreSlim(1, 1);
         // Write verification (async via Task.Delay)
@@ -49,7 +57,9 @@ namespace X15FanControl
         private bool _explicitExitRequested;
         private bool _trayHintShown;
         private bool _startMinimizedToTray;
+        private bool _isAutoStart;
         private ToolStripMenuItem _trayModeItem;
+        private ToolStripMenuItem _startupMenuItem;
 
         // Async logging
         private readonly ConcurrentQueue<string> _logQueue = new ConcurrentQueue<string>();
@@ -57,7 +67,8 @@ namespace X15FanControl
         private Task _logFlushTask;
         private int _currentLogLines;
 
-        // No separate fields needed for now
+        // Chart downsampling
+        private int _chartTickCounter;
 
         // Sensor stall detection (CPU only)
         private int _cpuTempStallCount;
@@ -125,9 +136,10 @@ namespace X15FanControl
         private readonly List<CalibrationRecord> _calibrationRecords = new List<CalibrationRecord>();
         private FanSnapshot _lastSnapshot;
 
-        public MainForm(bool startMinimized = false)
+        public MainForm(bool startMinimized = false, bool isAutoStart = false)
         {
             _startMinimizedToTray = startMinimized;
+            _isAutoStart = isAutoStart;
             Text = "X15 风扇控制 — 静音稳定控制器";
             StartPosition = FormStartPosition.CenterScreen;
             MinimumSize = new Size(1080, 720);
@@ -192,8 +204,17 @@ namespace X15FanControl
 
         private async void MainForm_Shown(object sender, EventArgs e)
         {
-            // 此方法异步执行，不阻塞UI线程
-            // GUI在2秒内已可交互
+            // 如果 --minimized，在窗口显示前隐藏到托盘，避免闪烁
+            if (_startMinimizedToTray)
+            {
+                // 窗口已创建但尚未显示：立即隐藏
+                BeginInvoke(new Action(() =>
+                {
+                    HideToTray();
+                    AppendLog("以 --minimized 模式启动，已隐藏到托盘");
+                }));
+            }
+
             try
             {
                 await InitializeHardwareAsync();
@@ -201,14 +222,20 @@ namespace X15FanControl
             catch (Exception ex)
             {
                 AppendLog("初始化异常：" + ex.Message);
-                _hardwareStatusLabel.Text = "初始化异常：" + ex.Message;
-                _hardwareStatusLabel.ForeColor = Color.Red;
+                if (!_startMinimizedToTray)
+                {
+                    _hardwareStatusLabel.Text = "初始化异常：" + ex.Message;
+                    _hardwareStatusLabel.ForeColor = Color.Red;
+                }
             }
 
-            // 如果命令行指定 --minimized，初始化完成后隐藏到托盘
-            if (_startMinimizedToTray)
+            // Start background control loop (replaces UI timer control work)
+            StartBackgroundControl();
+
+            // Handle auto-Active on --autostart
+            if (_isAutoStart && _config.AutoEnterActiveOnStartup)
             {
-                HideToTray();
+                TryAutoActive();
             }
         }
 
@@ -325,10 +352,10 @@ namespace X15FanControl
                 AppendLog("GPU遥测15秒内未收到数据，标记为不可用");
             }
 
-            // 4. 启动主定时器
+            // 4. 启动UI刷新定时器（不再负责硬件控制）
             Invoke(new Action(() =>
             {
-                _mainTimer.Interval = Math.Max(250, Math.Min(2000, _config.PollIntervalMs));
+                _mainTimer.Interval = Math.Max(250, Math.Min(2000, _config.UiRefreshIntervalMs));
                 _mainTimer.Start();
                 _lastTickUtc = DateTime.UtcNow;
             }));
@@ -350,12 +377,12 @@ namespace X15FanControl
 
             menu.Items.Add("恢复原厂自动", null, delegate { RestoreAuto("Tray command"); });
 
-            var startupItem = new ToolStripMenuItem("开机自动启动")
+            _startupMenuItem = new ToolStripMenuItem("开机自动启动")
             {
                 Checked = IsStartupTaskRegistered()
             };
-            startupItem.Click += delegate { ToggleStartupTask(); };
-            menu.Items.Add(startupItem);
+            _startupMenuItem.Click += delegate { ToggleStartupTask(); };
+            menu.Items.Add(_startupMenuItem);
 
             menu.Items.Add(new ToolStripSeparator());
             menu.Items.Add("退出", null, delegate { ExitApplication(); });
@@ -472,6 +499,7 @@ namespace X15FanControl
             if (currentlyRegistered)
             {
                 success = UnregisterStartupTask();
+                if (success) success = !IsStartupTaskRegistered();
                 if (success)
                 {
                     AppendLog("开机自启动已关闭");
@@ -481,6 +509,7 @@ namespace X15FanControl
             else
             {
                 success = RegisterStartupTask();
+                if (success) success = IsStartupTaskRegistered();
                 if (success)
                 {
                     AppendLog("开机自启动已开启");
@@ -488,7 +517,12 @@ namespace X15FanControl
                 }
             }
 
-            if (!success)
+            if (success)
+            {
+                if (_startupMenuItem != null) _startupMenuItem.Checked = !currentlyRegistered;
+                SaveConfig();
+            }
+            else
             {
                 AppendLog("修改开机自启动失败，请以管理员权限运行");
                 MessageBox.Show("修改开机自启动失败。\r\n请以管理员权限运行本程序后重试。",

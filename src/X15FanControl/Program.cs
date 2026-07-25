@@ -88,11 +88,16 @@ namespace X15FanControl
             {
                 // Parse GUI-specific flags that don't block GUI mode
                 bool startMinimized = false;
+                bool isAutoStart = false;
                 var cliArgs = new List<string>();
                 foreach (string arg in args)
                 {
-                    if (arg == "--minimized") startMinimized = true;
-                    else cliArgs.Add(arg);
+                    if (arg.Equals("--minimized", StringComparison.OrdinalIgnoreCase))
+                        startMinimized = true;
+                    else if (arg.Equals("--autostart", StringComparison.OrdinalIgnoreCase))
+                        isAutoStart = true;
+                    else
+                        cliArgs.Add(arg);
                 }
 
                 // 命令行模式：优先解析参数，绝不创建GUI
@@ -143,7 +148,7 @@ namespace X15FanControl
                     }
                 };
 
-                Application.Run(new MainForm(startMinimized));
+                Application.Run(new MainForm(startMinimized, isAutoStart));
             }
             finally
             {
