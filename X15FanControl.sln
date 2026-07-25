@@ -1,0 +1,39 @@
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.0.31903.59
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "X15FanCore", "src\X15FanCore\X15FanCore.csproj", "{A0C83B5E-4AB7-4D9B-BA21-2256A84B1661}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "X15FanControl", "src\X15FanControl\X15FanControl.csproj", "{B8712A29-9258-43D7-80D1-6F6E0FE43DC3}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "X15FanWatchdog", "src\X15FanWatchdog\X15FanWatchdog.csproj", "{CC31BE8F-E3DF-4F07-A662-C319D8519AC7}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "X15GpuTelemetry", "src\X15GpuTelemetry\X15GpuTelemetry.csproj", "{D5C8B37A-4D35-4DA2-80EF-B977FCE93629}"
+EndProject
+Global
+    GlobalSection(SolutionConfigurationPlatforms) = preSolution
+        Debug|x86 = Debug|x86
+        Release|x86 = Release|x86
+    EndGlobalSection
+    GlobalSection(ProjectConfigurationPlatforms) = postSolution
+        {A0C83B5E-4AB7-4D9B-BA21-2256A84B1661}.Debug|x86.ActiveCfg = Debug|x86
+        {A0C83B5E-4AB7-4D9B-BA21-2256A84B1661}.Debug|x86.Build.0 = Debug|x86
+        {A0C83B5E-4AB7-4D9B-BA21-2256A84B1661}.Release|x86.ActiveCfg = Release|x86
+        {A0C83B5E-4AB7-4D9B-BA21-2256A84B1661}.Release|x86.Build.0 = Release|x86
+        {B8712A29-9258-43D7-80D1-6F6E0FE43DC3}.Debug|x86.ActiveCfg = Debug|x86
+        {B8712A29-9258-43D7-80D1-6F6E0FE43DC3}.Debug|x86.Build.0 = Debug|x86
+        {B8712A29-9258-43D7-80D1-6F6E0FE43DC3}.Release|x86.ActiveCfg = Release|x86
+        {B8712A29-9258-43D7-80D1-6F6E0FE43DC3}.Release|x86.Build.0 = Release|x86
+        {CC31BE8F-E3DF-4F07-A662-C319D8519AC7}.Debug|x86.ActiveCfg = Debug|x86
+        {CC31BE8F-E3DF-4F07-A662-C319D8519AC7}.Debug|x86.Build.0 = Debug|x86
+        {CC31BE8F-E3DF-4F07-A662-C319D8519AC7}.Release|x86.ActiveCfg = Release|x86
+        {CC31BE8F-E3DF-4F07-A662-C319D8519AC7}.Release|x86.Build.0 = Release|x86
+        {D5C8B37A-4D35-4DA2-80EF-B977FCE93629}.Debug|x86.ActiveCfg = Debug|x64
+        {D5C8B37A-4D35-4DA2-80EF-B977FCE93629}.Debug|x86.Build.0 = Debug|x64
+        {D5C8B37A-4D35-4DA2-80EF-B977FCE93629}.Release|x86.ActiveCfg = Release|x64
+        {D5C8B37A-4D35-4DA2-80EF-B977FCE93629}.Release|x86.Build.0 = Release|x64
+    EndGlobalSection
+    GlobalSection(SolutionProperties) = preSolution
+        HideSolutionNode = FALSE
+    EndGlobalSection
+EndGlobal

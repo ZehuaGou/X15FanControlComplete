@@ -1,0 +1,16 @@
+.vs/
+bin/
+obj/
+dist/
+*.user
+*.suo
+*.log
+[Dd]ebug/
+[Rr]elease/
+packages/
+.codegraph/
+*.tmp
+
+# Third-party binary: user must copy from Brz installation
+vendor/ClevoEcInfo.dll
+dist/ClevoEcInfo.dll
