@@ -91,7 +91,35 @@ namespace X15FanCore.Control
         public void Stop()
         {
             _running = false;
-            KillHelperTree();
+
+            // 优雅关闭：先尝试让辅助程序正常退出
+            Process helper = _helperProcess;
+            if (helper != null)
+            {
+                try
+                {
+                    if (!helper.HasExited)
+                    {
+                        // 向stdin写空行或关闭stdin让辅助程序感知到父进程退出
+                        try { helper.StandardInput.Dispose(); } catch { }
+                        // 等待最多2秒让辅助程序检测到父PID退出
+                        if (helper.WaitForExit(2000))
+                        {
+                            System.Diagnostics.Trace.WriteLine("[GpuTelemetry] 辅助程序已正常退出");
+                        }
+                        else
+                        {
+                            System.Diagnostics.Trace.WriteLine("[GpuTelemetry] 辅助程序未在2秒内退出，强制终止");
+                            KillHelperTree();
+                        }
+                    }
+                }
+                catch
+                {
+                    KillHelperTree();
+                }
+            }
+
             if (_readerThread != null && _readerThread.IsAlive)
             {
                 _readerThread.Join(3000);
@@ -211,7 +239,7 @@ namespace X15FanCore.Control
                 ProcessStartInfo psi = new ProcessStartInfo
                 {
                     FileName = _helperExePath,
-                    Arguments = "--interval-ms " + _pollIntervalMs,
+                    Arguments = "--interval-ms " + _pollIntervalMs + " --parent-pid " + Process.GetCurrentProcess().Id,
                     UseShellExecute = false,
                     CreateNoWindow = true,
                     RedirectStandardOutput = true,

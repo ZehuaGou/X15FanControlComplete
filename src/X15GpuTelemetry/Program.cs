@@ -1,6 +1,8 @@
 using System;
+using System.ComponentModel;
 using System.Diagnostics;
 using System.IO;
+using System.Runtime.InteropServices;
 using System.Text;
 using System.Threading;
 
@@ -8,12 +10,68 @@ namespace X15GpuTelemetry
 {
     internal static class Program
     {
+        // --- Windows Job Object P/Invoke ---
+        private const int JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE = 0x00002000;
+        private const uint JOB_OBJECT_EXTENDED_LIMIT_INFORMATION = 9;
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_BASIC_LIMIT_INFORMATION
+        {
+            public long PerProcessUserTimeLimit;
+            public long PerJobUserTimeLimit;
+            public uint LimitFlags;
+            public UIntPtr MinimumWorkingSetSize;
+            public UIntPtr MaximumWorkingSetSize;
+            public uint ActiveProcessLimit;
+            public UIntPtr Affinity;
+            public uint PriorityClass;
+            public uint SchedulingClass;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct JOBOBJECT_EXTENDED_LIMIT_INFORMATION
+        {
+            public JOBOBJECT_BASIC_LIMIT_INFORMATION BasicLimitInformation;
+            public IO_COUNTERS IoInfo;
+            public UIntPtr ProcessMemoryLimit;
+            public UIntPtr JobMemoryLimit;
+            public UIntPtr PeakProcessMemoryUsed;
+            public UIntPtr PeakJobMemoryUsed;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        private struct IO_COUNTERS
+        {
+            public ulong ReadOperationCount;
+            public ulong WriteOperationCount;
+            public ulong OtherOperationCount;
+            public ulong ReadTransferCount;
+            public ulong WriteTransferCount;
+            public ulong OtherTransferCount;
+        }
+
+        [DllImport("kernel32.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        private static extern IntPtr CreateJobObject(IntPtr lpJobAttributes, string lpName);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool SetInformationJobObject(IntPtr hJob, uint JobObjectInfoClass,
+            IntPtr lpJobObjectInfo, uint cbJobObjectInfoLength);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool AssignProcessToJobObject(IntPtr hJob, IntPtr hProcess);
+
+        [DllImport("kernel32.dll", SetLastError = true)]
+        private static extern bool CloseHandle(IntPtr hObject);
+
+        // --- Main ---
         private static int Main(string[] args)
         {
             // x64 helper: runs nvidia-smi in a loop, outputs JSON Lines to stdout.
-            // Invocation: X15GpuTelemetry.exe [--interval-ms 1000] [--smi-path <path>]
+            // Invocation: X15GpuTelemetry.exe [--interval-ms 1000] [--smi-path <path>] [--parent-pid <PID>]
             int intervalMs = 1000;
+            int parentPid = 0;
             string smiPath = FindNvidiaSmi();
+            int myPid = Process.GetCurrentProcess().Id;
 
             for (int i = 0; i < args.Length; i++)
             {
@@ -21,6 +79,8 @@ namespace X15GpuTelemetry
                     int.TryParse(args[++i], out intervalMs);
                 if (args[i] == "--smi-path" && i + 1 < args.Length)
                     smiPath = args[++i];
+                if (args[i] == "--parent-pid" && i + 1 < args.Length)
+                    int.TryParse(args[++i], out parentPid);
             }
 
             if (smiPath == null || !File.Exists(smiPath))
@@ -32,9 +92,60 @@ namespace X15GpuTelemetry
             intervalMs = Math.Max(200, Math.Min(10000, intervalMs));
 
             // Write header so the parent knows we're alive
-            WriteTelemetry("info", new { message = "X15GpuTelemetry starting", smiPath, intervalMs });
+            WriteTelemetry("info", new { message = "X15GpuTelemetry starting", smiPath, intervalMs, parentPid, myPid });
 
+            // --- Create Job Object with KILL_ON_JOB_CLOSE ---
+            IntPtr jobHandle = IntPtr.Zero;
+            try
+            {
+                jobHandle = CreateJobObject(IntPtr.Zero, null);
+                if (jobHandle == IntPtr.Zero)
+                {
+                    int err = Marshal.GetLastWin32Error();
+                    WriteError("CreateJobObject failed: " + new Win32Exception(err).Message);
+                    return 1;
+                }
+
+                JOBOBJECT_EXTENDED_LIMIT_INFORMATION jobInfo = new JOBOBJECT_EXTENDED_LIMIT_INFORMATION();
+                jobInfo.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
+
+                IntPtr jobInfoPtr = Marshal.AllocHGlobal(Marshal.SizeOf(jobInfo));
+                try
+                {
+                    Marshal.StructureToPtr(jobInfo, jobInfoPtr, false);
+                    if (!SetInformationJobObject(jobHandle, JOB_OBJECT_EXTENDED_LIMIT_INFORMATION,
+                        jobInfoPtr, (uint)Marshal.SizeOf(jobInfo)))
+                    {
+                        int err = Marshal.GetLastWin32Error();
+                        WriteError("SetInformationJobObject failed: " + new Win32Exception(err).Message);
+                        JobObjectCleanup(jobHandle);
+                        jobHandle = IntPtr.Zero;
+                        return 1;
+                    }
+                }
+                finally
+                {
+                    Marshal.FreeHGlobal(jobInfoPtr);
+                }
+
+                WriteTelemetry("info", new { message = "Job Object created with KILL_ON_JOB_CLOSE", handle = jobHandle.ToInt64() });
+            }
+            catch (Exception ex)
+            {
+                WriteError("Job Object setup failed: " + ex.Message);
+                if (jobHandle != IntPtr.Zero)
+                {
+                    JobObjectCleanup(jobHandle);
+                    jobHandle = IntPtr.Zero;
+                }
+                return 1;
+            }
+
+            // --- Start nvidia-smi ---
             Process smiProcess = null;
+            var cts = new CancellationTokenSource();
+            int exitCode = 0;
+
             try
             {
                 ProcessStartInfo psi = new ProcessStartInfo
@@ -45,47 +156,161 @@ namespace X15GpuTelemetry
                     CreateNoWindow = true,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
-                    StandardOutputEncoding = Encoding.UTF8
+                    StandardOutputEncoding = Encoding.UTF8,
+                    StandardErrorEncoding = Encoding.UTF8
                 };
 
                 smiProcess = Process.Start(psi);
-
-                // Read stdout line by line
-                string line;
-                while ((line = smiProcess.StandardOutput.ReadLine()) != null)
+                if (smiProcess == null)
                 {
-                    if (string.IsNullOrWhiteSpace(line))
-                        continue;
+                    WriteError("nvidia-smi process start returned null.");
+                    exitCode = 1;
+                    return 1;
+                }
 
-                    var parsed = ParseSmiLine(line);
+                WriteTelemetry("info", new { message = "nvidia-smi started", nvidiaSmiPid = smiProcess.Id });
+
+                // --- Assign nvidia-smi to Job Object ---
+                if (jobHandle != IntPtr.Zero)
+                {
+                    try
+                    {
+                        if (!smiProcess.HasExited)
+                        {
+                            if (AssignProcessToJobObject(jobHandle, smiProcess.Handle))
+                            {
+                                WriteTelemetry("info", new { message = "nvidia-smi assigned to Job Object" });
+                            }
+                            else
+                            {
+                                int err = Marshal.GetLastWin32Error();
+                                WriteError("AssignProcessToJobObject failed: " + new Win32Exception(err).Message);
+                            }
+                        }
+                    }
+                    catch (Exception ex)
+                    {
+                        WriteError("AssignProcessToJobObject exception: " + ex.Message);
+                    }
+                }
+
+                // --- Async stdout reading ---
+                var outputDone = new ManualResetEvent(false);
+                var outputErrors = new StringBuilder();
+
+                smiProcess.OutputDataReceived += (sender, e) =>
+                {
+                    if (e.Data == null)
+                    {
+                        outputDone.Set();
+                        return;
+                    }
+                    if (string.IsNullOrWhiteSpace(e.Data))
+                        return;
+
+                    var parsed = ParseSmiLine(e.Data);
                     if (parsed != null)
                     {
                         WriteTelemetry("smi", parsed);
                     }
                     else
                     {
-                        WriteTelemetry("smi_raw", new { raw = line });
+                        WriteTelemetry("smi_raw", new { raw = e.Data });
                     }
+                };
+
+                smiProcess.ErrorDataReceived += (sender, e) =>
+                {
+                    if (e.Data != null)
+                    {
+                        lock (outputErrors)
+                            outputErrors.AppendLine(e.Data);
+                    }
+                };
+
+                smiProcess.BeginOutputReadLine();
+                smiProcess.BeginErrorReadLine();
+
+                // --- File and parent monitoring loop ---
+                CancellationToken token = cts.Token;
+                while (!token.IsCancellationRequested)
+                {
+                    // Check if parent process still exists
+                    if (parentPid > 0)
+                    {
+                        try
+                        {
+                            Process parentProc = Process.GetProcessById(parentPid);
+                            parentProc.Dispose();
+                        }
+                        catch (ArgumentException)
+                        {
+                            WriteTelemetry("info", new { message = "Parent process exited", parentPid });
+                            break;
+                        }
+                    }
+
+                    // Check if nvidia-smi exited
+                    if (smiProcess.HasExited)
+                    {
+                        string stderr;
+                        lock (outputErrors)
+                            stderr = outputErrors.ToString();
+                        WriteError("nvidia-smi exited: " + (string.IsNullOrEmpty(stderr) ? "unknown" : stderr));
+                        exitCode = 2;
+                        break;
+                    }
+
+                    // Use event-based wait instead of Sleep to allow cancellation
+                    if (token.WaitHandle.WaitOne(1000))
+                        break; // cancellation requested
                 }
 
-                // nvidia-smi exited
-                string stderr = smiProcess.StandardError.ReadToEnd();
-                WriteError("nvidia-smi exited: " + (string.IsNullOrEmpty(stderr) ? "unknown" : stderr));
-                return 2;
+                // Ensure nvidia-smi is terminated
+                if (smiProcess != null && !smiProcess.HasExited)
+                {
+                    try { smiProcess.Kill(); } catch { }
+                }
+
+                // Wait for the async read to finish
+                outputDone.WaitOne(2000);
             }
             catch (Exception ex)
             {
                 WriteError("X15GpuTelemetry error: " + ex.Message);
-                return 3;
+                exitCode = 3;
             }
             finally
             {
-                if (smiProcess != null && !smiProcess.HasExited)
+                // Stop async reading
+                try
                 {
-                    try { smiProcess.Kill(); } catch { }
-                    smiProcess.Dispose();
+                    if (smiProcess != null)
+                    {
+                        if (!smiProcess.HasExited)
+                        {
+                            try { smiProcess.Kill(); } catch { }
+                            smiProcess.WaitForExit(2000);
+                        }
+                        smiProcess.Dispose();
+                    }
+                }
+                catch { }
+
+                // Close the Job Object — with KILL_ON_JOB_CLOSE, this guarantees nvidia-smi exits
+                if (jobHandle != IntPtr.Zero)
+                {
+                    JobObjectCleanup(jobHandle);
+                    WriteTelemetry("info", new { message = "Job Object closed", nvidiaSmiExited = smiProcess?.HasExited ?? true });
                 }
             }
+
+            return exitCode;
+        }
+
+        private static void JobObjectCleanup(IntPtr jobHandle)
+        {
+            try { CloseHandle(jobHandle); } catch { }
         }
 
         private static object ParseSmiLine(string line)
@@ -141,7 +366,6 @@ namespace X15GpuTelemetry
 
         private static string SimpleJsonSerialize(object obj)
         {
-            // Minimal JSON serializer without external dependencies
             var sb = new StringBuilder();
             SerializeObject(sb, obj);
             return sb.ToString();
