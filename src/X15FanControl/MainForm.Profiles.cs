@@ -1,6 +1,7 @@
 using System;
 using System.Collections.Generic;
 using System.ComponentModel;
+using System.Drawing;
 using System.Linq;
 using System.Windows.Forms;
 using X15FanCore.Control;
@@ -12,62 +13,146 @@ namespace X15FanControl
     {
         private TabPage BuildProfilesTab()
         {
-            TabPage tab = new TabPage("配置与曲线");
-            TableLayoutPanel root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, Padding = new Padding(8) };
+            TabPage tab = new TabPage("配置与曲线") { BackColor = UiBackground };
+            TableLayoutPanel root = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 2,
+                Padding = new Padding(12),
+                BackColor = UiBackground
+            };
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 46));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
 
-            TabControl cpuTabs = new TabControl { Dock = DockStyle.Fill };
-            TabPage cpuCurvePage = new TabPage("CPU 曲线");
-            _cpuCurveGrid = BuildCurveGrid();
-            cpuCurvePage.Controls.Add(_cpuCurveGrid);
-            TabPage cpuSettingsPage = new TabPage("CPU 控制设置");
-            _cpuPropertyGrid = new PropertyGrid { Dock = DockStyle.Fill, HelpVisible = true, ToolbarVisible = true };
-            cpuSettingsPage.Controls.Add(_cpuPropertyGrid);
-            cpuTabs.TabPages.Add(cpuCurvePage);
-            cpuTabs.TabPages.Add(cpuSettingsPage);
+            Panel cpuEditor = BuildProfileEditorCard(
+                "CPU 曲线与控制参数", UiCpuAccent,
+                out _cpuCurveGrid, out _cpuPropertyGrid);
+            cpuEditor.Margin = new Padding(0, 0, 6, 0);
+            Panel gpuEditor = BuildProfileEditorCard(
+                "GPU 曲线与控制参数", UiGpuAccent,
+                out _gpuCurveGrid, out _gpuPropertyGrid);
+            gpuEditor.Margin = new Padding(6, 0, 0, 0);
 
-            TabControl gpuTabs = new TabControl { Dock = DockStyle.Fill };
-            TabPage gpuCurvePage = new TabPage("GPU 曲线");
-            _gpuCurveGrid = BuildCurveGrid();
-            gpuCurvePage.Controls.Add(_gpuCurveGrid);
-            TabPage gpuSettingsPage = new TabPage("GPU 控制设置");
-            _gpuPropertyGrid = new PropertyGrid { Dock = DockStyle.Fill, HelpVisible = true, ToolbarVisible = true };
-            gpuSettingsPage.Controls.Add(_gpuPropertyGrid);
-            gpuTabs.TabPages.Add(gpuCurvePage);
-            gpuTabs.TabPages.Add(gpuSettingsPage);
-
-            Panel footer = new Panel { Dock = DockStyle.Fill };
+            Panel footer = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = UiSurface,
+                Margin = new Padding(0, 8, 0, 0),
+                Padding = new Padding(10, 4, 10, 4)
+            };
             _profilePropertyGrid = new PropertyGrid { Visible = false };
-            _saveProfileButton = new Button { Text = "保存配置", Width = 120, Height = 30, Left = 8, Top = 7 };
+            _saveProfileButton = new Button { Text = "保存配置", Width = 112, Height = 32 };
+            StyleButton(_saveProfileButton, UiCpuAccent, Color.White);
+            _saveProfileButton.Margin = new Padding(4, 1, 4, 0);
             _saveProfileButton.Click += SaveProfileButtonClick;
-            _reloadProfileButton = new Button { Text = "重新加载", Width = 95, Height = 30, Left = 136, Top = 7 };
+            _reloadProfileButton = new Button { Text = "重新加载", Width = 96, Height = 32 };
+            StyleButton(_reloadProfileButton, Color.FromArgb(232, 237, 244), UiText);
+            _reloadProfileButton.Margin = new Padding(4, 1, 4, 0);
             _reloadProfileButton.Click += delegate { LoadProfileIntoEditor(GetActiveProfile()); };
-            Button profileSettingsButton = new Button { Text = "配置设置", Width = 115, Height = 30, Left = 239, Top = 7 };
+            Button profileSettingsButton = new Button { Text = "配置设置", Width = 102, Height = 32 };
+            StyleButton(profileSettingsButton, Color.FromArgb(232, 237, 244), UiText);
+            profileSettingsButton.Margin = new Padding(4, 1, 4, 0);
             profileSettingsButton.Click += delegate { ShowProfileSettingsDialog(); };
             Label note = new Label
             {
-                AutoSize = true,
-                Left = 365,
-                Top = 13,
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleRight,
+                ForeColor = UiMuted,
+                Padding = new Padding(0, 0, 8, 0),
                 Text = "活动模式使用已保存的配置。曲线温度必须从上到下递增。"
             };
-            footer.Controls.Add(_saveProfileButton);
-            footer.Controls.Add(_reloadProfileButton);
-            footer.Controls.Add(profileSettingsButton);
+            FlowLayoutPanel footerActions = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Left,
+                AutoSize = true,
+                WrapContents = false,
+                FlowDirection = FlowDirection.LeftToRight,
+                BackColor = UiSurface
+            };
+            footerActions.Controls.Add(_saveProfileButton);
+            footerActions.Controls.Add(_reloadProfileButton);
+            footerActions.Controls.Add(profileSettingsButton);
             footer.Controls.Add(note);
+            footer.Controls.Add(footerActions);
 
-            root.Controls.Add(cpuTabs, 0, 0);
-            root.Controls.Add(gpuTabs, 1, 0);
+            root.Controls.Add(cpuEditor, 0, 0);
+            root.Controls.Add(gpuEditor, 1, 0);
             root.Controls.Add(footer, 0, 1);
             root.SetColumnSpan(footer, 2);
             tab.Controls.Add(root);
             return tab;
         }
 
-        private static DataGridView BuildCurveGrid()
+        private Panel BuildProfileEditorCard(
+            string title,
+            Color accentColor,
+            out DataGridView curveGrid,
+            out PropertyGrid propertyGrid)
+        {
+            Panel card = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = UiSurface,
+                Padding = new Padding(12, 10, 12, 12)
+            };
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 3,
+                BackColor = UiSurface
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 44));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 56));
+
+            Panel header = new Panel { Dock = DockStyle.Fill, BackColor = UiSurface };
+            header.Controls.Add(new Label
+            {
+                Text = title,
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(12, 0, 0, 0),
+                ForeColor = UiText,
+                Font = new Font("Segoe UI Semibold", 11F)
+            });
+            header.Controls.Add(new Panel { Dock = DockStyle.Left, Width = 4, BackColor = accentColor });
+
+            curveGrid = BuildCurveGrid(accentColor);
+            propertyGrid = BuildPropertyGrid();
+            layout.Controls.Add(header, 0, 0);
+            layout.Controls.Add(BuildEditorSection("风扇曲线", curveGrid), 0, 1);
+            layout.Controls.Add(BuildEditorSection("控制参数", propertyGrid), 0, 2);
+            card.Controls.Add(layout);
+            return card;
+        }
+
+        private static Panel BuildEditorSection(string title, Control content)
+        {
+            Panel section = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(0, 0, 0, 4),
+                Margin = new Padding(4),
+                BackColor = UiSurface
+            };
+            section.Controls.Add(content);
+            section.Controls.Add(new Label
+            {
+                Text = title,
+                Dock = DockStyle.Top,
+                Height = 28,
+                TextAlign = ContentAlignment.MiddleLeft,
+                ForeColor = UiMuted,
+                Font = new Font("Segoe UI Semibold", 9F)
+            });
+            return section;
+        }
+
+        private static DataGridView BuildCurveGrid(Color accentColor)
         {
             DataGridView grid = new DataGridView
             {
@@ -76,8 +161,28 @@ namespace X15FanControl
                 AllowUserToAddRows = true,
                 AllowUserToDeleteRows = true,
                 RowHeadersVisible = false,
-                SelectionMode = DataGridViewSelectionMode.FullRowSelect
+                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
+                BorderStyle = BorderStyle.None,
+                BackgroundColor = UiSurface,
+                GridColor = UiBorder,
+                RowTemplate = { Height = 32 },
+                ColumnHeadersHeight = 36,
+                ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
+                EnableHeadersVisualStyles = false
             };
+            grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(239, 243, 248);
+            grid.ColumnHeadersDefaultCellStyle.ForeColor = UiText;
+            grid.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI Semibold", 9F);
+            grid.ColumnHeadersDefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
+            grid.DefaultCellStyle.BackColor = UiSurface;
+            grid.DefaultCellStyle.ForeColor = UiText;
+            grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(
+                Math.Min(255, accentColor.R + 175),
+                Math.Min(255, accentColor.G + 125),
+                Math.Min(255, accentColor.B + 20));
+            grid.DefaultCellStyle.SelectionForeColor = UiText;
+            grid.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
+            grid.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(248, 250, 252);
             grid.Columns.Add(new DataGridViewTextBoxColumn
             {
                 DataPropertyName = "TemperatureC",
@@ -91,6 +196,22 @@ namespace X15FanControl
                 AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill
             });
             return grid;
+        }
+
+        private static PropertyGrid BuildPropertyGrid()
+        {
+            return new PropertyGrid
+            {
+                Dock = DockStyle.Fill,
+                HelpVisible = false,
+                ToolbarVisible = false,
+                PropertySort = PropertySort.Categorized,
+                BackColor = UiSurface,
+                ViewBackColor = UiSurface,
+                ViewForeColor = UiText,
+                LineColor = UiBorder,
+                CategoryForeColor = UiText
+            };
         }
 
         private void PopulateProfiles()

@@ -19,6 +19,15 @@ namespace X15FanControl
 {
     public partial class MainForm : Form
     {
+        private static readonly Color UiBackground = Color.FromArgb(242, 245, 249);
+        private static readonly Color UiSurface = Color.White;
+        private static readonly Color UiBorder = Color.FromArgb(218, 224, 233);
+        private static readonly Color UiText = Color.FromArgb(37, 47, 61);
+        private static readonly Color UiMuted = Color.FromArgb(101, 112, 130);
+        private static readonly Color UiCpuAccent = Color.FromArgb(42, 112, 232);
+        private static readonly Color UiGpuAccent = Color.FromArgb(124, 82, 214);
+        private static readonly Color UiWarmAccent = Color.FromArgb(239, 126, 56);
+
         private readonly string _dataDirectory;
         private readonly string _configPath;
         private readonly string _heartbeatPath;
@@ -141,7 +150,7 @@ namespace X15FanControl
         private readonly List<CalibrationRecord> _calibrationRecords = new List<CalibrationRecord>();
         private FanSnapshot _lastSnapshot;
 
-        public MainForm(bool startMinimized = false, bool isAutoStart = false)
+        public MainForm(bool startMinimized = false, bool isAutoStart = false, bool uiPreview = false)
         {
             _startMinimizedToTray = startMinimized;
             _isAutoStart = isAutoStart;
@@ -170,15 +179,18 @@ namespace X15FanControl
             _mainTimer = new Timer();
             _mainTimer.Tick += MainTimerTick;
 
-            Load += MainFormLoad;
-            Shown += MainForm_Shown;
-            FormClosing += MainFormClosing;
-            Resize += MainFormResize;
-            SystemEvents.PowerModeChanged += SystemEventsPowerModeChanged;
+            if (!uiPreview)
+            {
+                Load += MainFormLoad;
+                Shown += MainForm_Shown;
+                FormClosing += MainFormClosing;
+                Resize += MainFormResize;
+                SystemEvents.PowerModeChanged += SystemEventsPowerModeChanged;
 
-            // Start background log flush task
-            _logCts = new System.Threading.CancellationTokenSource();
-            _logFlushTask = Task.Run(() => LogFlushLoop(_logCts.Token));
+                // Start background log flush task
+                _logCts = new System.Threading.CancellationTokenSource();
+                _logFlushTask = Task.Run(() => LogFlushLoop(_logCts.Token));
+            }
         }
 
         private void MainFormLoad(object sender, EventArgs e)
@@ -606,7 +618,16 @@ namespace X15FanControl
         private void BuildUserInterface()
         {
             Panel header = BuildHeader();
-            TabControl tabs = new TabControl { Dock = DockStyle.Fill };
+            TabControl tabs = new TabControl
+            {
+                Dock = DockStyle.Fill,
+                DrawMode = TabDrawMode.OwnerDrawFixed,
+                SizeMode = TabSizeMode.Fixed,
+                ItemSize = new Size(118, 34),
+                Padding = new Point(16, 6),
+                Font = new Font("Segoe UI Semibold", 9.5F)
+            };
+            tabs.DrawItem += MainTabsDrawItem;
             tabs.TabPages.Add(BuildDashboardTab());
             tabs.TabPages.Add(BuildProfilesTab());
             tabs.TabPages.Add(BuildCalibrationTab());
@@ -618,35 +639,71 @@ namespace X15FanControl
 
         private Panel BuildHeader()
         {
-            Panel panel = new Panel { Dock = DockStyle.Top, Height = 78, Padding = new Padding(12), BackColor = Color.FromArgb(29, 37, 49) };
+            Panel panel = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 82,
+                Padding = new Padding(16, 10, 14, 10),
+                BackColor = Color.FromArgb(27, 36, 49)
+            };
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 1,
+                BackColor = panel.BackColor
+            };
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 66));
+
+            Panel brand = new Panel { Dock = DockStyle.Fill, BackColor = panel.BackColor };
             Label title = new Label
             {
                 Text = "X15 风扇控制",
                 ForeColor = Color.White,
                 AutoSize = true,
                 Font = new Font("Segoe UI Semibold", 17F),
-                Location = new Point(12, 10)
+                Location = new Point(0, 0)
             };
             Label subtitle = new Label
             {
                 Text = "COLORFUL X15 AT 23 / Clevo NP50SNE — x86 EC 控制器",
                 ForeColor = Color.Gainsboro,
                 AutoSize = true,
-                Location = new Point(14, 45)
+                Location = new Point(2, 37)
             };
+            brand.Controls.Add(title);
+            brand.Controls.Add(subtitle);
 
-            _profileCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 190, Location = new Point(480, 23) };
+            _profileCombo = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Width = 170,
+                Height = 30,
+                Margin = new Padding(6, 5, 6, 0)
+            };
             _profileCombo.SelectedIndexChanged += ProfileComboSelectedIndexChanged;
-            _modeCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Width = 125, Location = new Point(680, 23) };
-            _applyModeButton = new Button { Text = "应用模式", Width = 95, Height = 27, Location = new Point(815, 22), BackColor = Color.FromArgb(60, 120, 200), ForeColor = Color.White };
+            _modeCombo = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Width = 112,
+                Height = 30,
+                Margin = new Padding(0, 5, 6, 0)
+            };
+            _applyModeButton = new Button { Text = "应用模式", Width = 88, Height = 31 };
+            StyleButton(_applyModeButton, UiCpuAccent, Color.White);
             _applyModeButton.Click += ApplyModeButtonClick;
-            _restoreAutoButton = new Button { Text = "恢复自动", Width = 105, Height = 27, Location = new Point(920, 22), BackColor = Color.LightGoldenrodYellow };
+            _restoreAutoButton = new Button { Text = "恢复自动", Width = 92, Height = 31 };
+            StyleButton(_restoreAutoButton, Color.FromArgb(255, 244, 204), Color.FromArgb(102, 76, 0));
             _restoreAutoButton.Click += delegate { RestoreAuto("Manual Restore Auto"); };
-            Button ecProbeButton = new Button { Text = "EC诊断", Width = 65, Height = 27, Location = new Point(1035, 22), BackColor = Color.LightCyan };
+            Button ecProbeButton = new Button { Text = "EC诊断", Width = 68, Height = 31 };
+            StyleButton(ecProbeButton, Color.FromArgb(225, 247, 250), Color.FromArgb(0, 91, 104));
             ecProbeButton.Click += delegate { RunEcProbe(); };
             _modeStatusPanel = new Panel
             {
-                Width = 60, Height = 26, Location = new Point(1110, 24),
+                Width = 58,
+                Height = 30,
+                Margin = new Padding(6, 5, 0, 0),
                 BackColor = Color.FromArgb(0, 100, 0)
             };
             _modeStatusLabel = new Label
@@ -654,61 +711,114 @@ namespace X15FanControl
                 Text = "只读",
                 ForeColor = Color.White,
                 Font = new Font("Segoe UI", 9F, FontStyle.Bold),
-                AutoSize = false, Width = 60, Height = 26,
+                AutoSize = false, Dock = DockStyle.Fill,
                 TextAlign = ContentAlignment.MiddleCenter,
-                Location = new Point(0, 0)
             };
             _modeStatusPanel.Controls.Add(_modeStatusLabel);
 
-            panel.Controls.Add(title);
-            panel.Controls.Add(subtitle);
-            panel.Controls.Add(new Label { Text = "配置", ForeColor = Color.White, AutoSize = true, Location = new Point(430, 27) });
-            panel.Controls.Add(_profileCombo);
-            panel.Controls.Add(_modeCombo);
-            panel.Controls.Add(_applyModeButton);
-            panel.Controls.Add(_restoreAutoButton);
-            panel.Controls.Add(ecProbeButton);
-            panel.Controls.Add(_modeStatusPanel);
+            FlowLayoutPanel actions = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                Padding = new Padding(0, 12, 0, 0),
+                BackColor = panel.BackColor
+            };
+            actions.Controls.Add(new Label
+            {
+                Text = "配置",
+                ForeColor = Color.Gainsboro,
+                AutoSize = true,
+                Margin = new Padding(0, 11, 2, 0)
+            });
+            actions.Controls.Add(_profileCombo);
+            actions.Controls.Add(_modeCombo);
+            actions.Controls.Add(_applyModeButton);
+            actions.Controls.Add(_restoreAutoButton);
+            actions.Controls.Add(ecProbeButton);
+            actions.Controls.Add(_modeStatusPanel);
+
+            layout.Controls.Add(brand, 0, 0);
+            layout.Controls.Add(actions, 1, 0);
+            panel.Controls.Add(layout);
             return panel;
+        }
+
+        private void MainTabsDrawItem(object sender, DrawItemEventArgs e)
+        {
+            TabControl tabs = sender as TabControl;
+            if (tabs == null || e.Index < 0 || e.Index >= tabs.TabPages.Count)
+                return;
+
+            bool selected = e.Index == tabs.SelectedIndex;
+            Rectangle bounds = e.Bounds;
+            using (SolidBrush background = new SolidBrush(selected ? UiSurface : UiBackground))
+            using (SolidBrush textBrush = new SolidBrush(selected ? UiCpuAccent : UiMuted))
+            {
+                e.Graphics.FillRectangle(background, bounds);
+                TextRenderer.DrawText(
+                    e.Graphics,
+                    tabs.TabPages[e.Index].Text,
+                    tabs.Font,
+                    bounds,
+                    textBrush.Color,
+                    TextFormatFlags.HorizontalCenter |
+                    TextFormatFlags.VerticalCenter |
+                    TextFormatFlags.SingleLine);
+            }
+            if (selected)
+            {
+                using (SolidBrush accent = new SolidBrush(UiCpuAccent))
+                {
+                    e.Graphics.FillRectangle(accent, bounds.Left + 10, bounds.Bottom - 3, bounds.Width - 20, 3);
+                }
+            }
+        }
+
+        private static void StyleButton(Button button, Color backColor, Color foreColor)
+        {
+            button.FlatStyle = FlatStyle.Flat;
+            button.FlatAppearance.BorderSize = 0;
+            button.BackColor = backColor;
+            button.ForeColor = foreColor;
+            button.Font = new Font("Segoe UI Semibold", 9F);
+            button.Margin = new Padding(4, 5, 4, 0);
+            button.Cursor = Cursors.Hand;
         }
 
         private TabPage BuildDashboardTab()
         {
-            Color pageColor = Color.FromArgb(244, 247, 251);
-            Color cpuAccent = Color.FromArgb(42, 112, 232);
-            Color gpuAccent = Color.FromArgb(124, 82, 214);
-
-            TabPage tab = new TabPage("仪表盘") { BackColor = pageColor };
+            TabPage tab = new TabPage("仪表盘") { BackColor = UiBackground };
             TableLayoutPanel root = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
                 RowCount = 2,
                 Padding = new Padding(12),
-                BackColor = pageColor
+                BackColor = UiBackground
             };
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
 
             TableLayoutPanel cards = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 2,
                 RowCount = 1,
-                BackColor = pageColor
+                BackColor = UiBackground
             };
             cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
 
             GroupBox cpuCard = BuildFanDashboardCard(
-                "CPU", cpuAccent,
+                "CPU", UiCpuAccent,
                 out _cpuTempLabel, out _cpuFilteredLabel, out _cpuDutyLabel,
                 out _cpuTargetLabel, out _cpuRpmLabel, out _cpuCardBox,
                 out _cpuHistoryChart);
             cpuCard.Margin = new Padding(0, 0, 6, 0);
 
             GroupBox gpuCard = BuildFanDashboardCard(
-                "GPU", gpuAccent,
+                "GPU", UiGpuAccent,
                 out _gpuTempLabel, out _gpuFilteredLabel, out _gpuDutyLabel,
                 out _gpuTargetLabel, out _gpuRpmLabel, out _gpuCardBox,
                 out _gpuHistoryChart);
@@ -723,9 +833,9 @@ namespace X15FanControl
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
                 RowCount = 2,
-                Padding = new Padding(10, 4, 10, 2),
-                Margin = new Padding(0, 8, 0, 0),
-                BackColor = Color.White
+                Padding = new Padding(10, 2, 10, 2),
+                Margin = new Padding(0, 6, 0, 0),
+                BackColor = UiSurface
             };
             statusPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
             statusPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
@@ -773,7 +883,7 @@ namespace X15FanControl
                 Text = title,
                 Dock = DockStyle.Fill,
                 Padding = new Padding(12, 10, 12, 12),
-                BackColor = Color.White,
+                BackColor = UiSurface,
                 Font = new Font("Segoe UI Semibold", 9.5F)
             };
             boxRef = box;
@@ -782,9 +892,9 @@ namespace X15FanControl
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
                 RowCount = 2,
-                BackColor = Color.White
+                BackColor = UiSurface
             };
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 156));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 190));
             layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
             TableLayoutPanel metrics = new TableLayoutPanel
@@ -792,10 +902,10 @@ namespace X15FanControl
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
                 RowCount = 2,
-                BackColor = Color.White
+                BackColor = UiSurface
             };
-            metrics.RowStyles.Add(new RowStyle(SizeType.Percent, 57));
-            metrics.RowStyles.Add(new RowStyle(SizeType.Percent, 43));
+            metrics.RowStyles.Add(new RowStyle(SizeType.Percent, 55));
+            metrics.RowStyles.Add(new RowStyle(SizeType.Percent, 45));
 
             TableLayoutPanel primaryMetrics = new TableLayoutPanel
             {
@@ -819,7 +929,7 @@ namespace X15FanControl
             secondaryMetrics.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.333F));
             secondaryMetrics.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.333F));
             secondaryMetrics.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.334F));
-            Color secondaryValueColor = Color.FromArgb(48, 58, 72);
+            Color secondaryValueColor = UiText;
             secondaryMetrics.Controls.Add(
                 BuildMetricTile("平滑温度", "°C", secondaryValueColor, false, out filtered), 0, 0);
             secondaryMetrics.Controls.Add(
@@ -962,7 +1072,7 @@ namespace X15FanControl
             });
             AddSeries(chart, temperatureSeriesName, "温度", SeriesChartType.FastLine, accentColor, ChartDashStyle.Solid);
             AddSeries(chart, targetSeriesName, "目标输出", SeriesChartType.StepLine,
-                Color.FromArgb(239, 126, 56), ChartDashStyle.Dash);
+                UiWarmAccent, ChartDashStyle.Dash);
             return chart;
         }
 
@@ -988,17 +1098,61 @@ namespace X15FanControl
 
         private TabPage BuildLogsTab()
         {
-            TabPage tab = new TabPage("日志");
+            TabPage tab = new TabPage("日志") { BackColor = UiBackground };
+            Panel root = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(12),
+                BackColor = UiBackground
+            };
+            Panel card = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(14),
+                BackColor = UiSurface
+            };
+            Panel header = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 42,
+                BackColor = UiSurface
+            };
+            header.Controls.Add(new Label
+            {
+                Text = "运行日志",
+                Dock = DockStyle.Left,
+                Width = 160,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(12, 0, 0, 0),
+                ForeColor = UiText,
+                Font = new Font("Segoe UI Semibold", 11F)
+            });
+            header.Controls.Add(new Label
+            {
+                Text = "实时追加 · 只读",
+                Dock = DockStyle.Right,
+                Width = 150,
+                TextAlign = ContentAlignment.MiddleRight,
+                Padding = new Padding(0, 0, 8, 0),
+                ForeColor = UiMuted
+            });
+            header.Controls.Add(new Panel { Dock = DockStyle.Left, Width = 4, BackColor = UiCpuAccent });
             _logTextBox = new TextBox
             {
                 Dock = DockStyle.Fill,
                 Multiline = true,
                 ReadOnly = true,
                 ScrollBars = ScrollBars.Both,
-                Font = new Font("Consolas", 9F),
-                WordWrap = false
+                Font = new Font("Consolas", 9.5F),
+                WordWrap = false,
+                BorderStyle = BorderStyle.None,
+                BackColor = Color.FromArgb(24, 31, 42),
+                ForeColor = Color.FromArgb(220, 226, 235)
             };
-            tab.Controls.Add(_logTextBox);
+            card.Controls.Add(_logTextBox);
+            card.Controls.Add(header);
+            root.Controls.Add(card);
+            tab.Controls.Add(root);
             return tab;
         }
     }

@@ -13,19 +13,58 @@ namespace X15FanControl
     {
         private TabPage BuildCalibrationTab()
         {
-            TabPage tab = new TabPage("声学校准");
-            TableLayoutPanel root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 2, Padding = new Padding(12) };
-            root.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 390));
-            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            TabPage tab = new TabPage("声学校准") { BackColor = UiBackground };
+            TableLayoutPanel root = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 2,
+                Padding = new Padding(12),
+                BackColor = UiBackground
+            };
+            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 38));
+            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 62));
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
 
-            GroupBox setup = new GroupBox { Text = "固定占空比扫描", Dock = DockStyle.Fill, Padding = new Padding(12) };
-            TableLayoutPanel form = new TableLayoutPanel { Dock = DockStyle.Top, ColumnCount = 2, AutoSize = true };
-            form.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 170));
-            form.ColumnStyles.Add(new ColumnStyle(SizeType.Absolute, 160));
+            Panel setup = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Margin = new Padding(0, 0, 6, 0),
+                Padding = new Padding(16),
+                BackColor = UiSurface
+            };
+            TableLayoutPanel setupLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 5,
+                BackColor = UiSurface
+            };
+            setupLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+            setupLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 205));
+            setupLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 52));
+            setupLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 105));
+            setupLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            setupLayout.Controls.Add(BuildSectionTitle("固定占空比扫描", UiCpuAccent), 0, 0);
 
-            _calibrationFanCombo = new ComboBox { DropDownStyle = ComboBoxStyle.DropDownList, Dock = DockStyle.Fill };
+            TableLayoutPanel form = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 5,
+                BackColor = UiSurface,
+                Padding = new Padding(4, 6, 4, 4)
+            };
+            form.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 48));
+            form.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 52));
+
+            _calibrationFanCombo = new ComboBox
+            {
+                DropDownStyle = ComboBoxStyle.DropDownList,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(4, 5, 4, 5)
+            };
             _calibrationFanCombo.Items.Add(FanKind.Cpu);
             _calibrationFanCombo.Items.Add(FanKind.Gpu);
             _calibrationFanCombo.SelectedIndex = 0;
@@ -40,12 +79,22 @@ namespace X15FanControl
             AddFormRow(form, 3, "步进 %", _calibrationStep);
             AddFormRow(form, 4, "每步保持 (秒)", _calibrationHold);
 
-            FlowLayoutPanel controls = new FlowLayoutPanel { Dock = DockStyle.Top, Height = 42, FlowDirection = FlowDirection.LeftToRight, Padding = new Padding(0, 8, 0, 0) };
-            _calibrationStartButton = new Button { Text = "开始扫描", Width = 100 };
+            FlowLayoutPanel controls = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                Padding = new Padding(0, 8, 0, 0),
+                BackColor = UiSurface
+            };
+            _calibrationStartButton = new Button { Text = "开始扫描", Width = 98, Height = 32 };
+            StyleButton(_calibrationStartButton, UiCpuAccent, Color.White);
             _calibrationStartButton.Click += CalibrationStartButtonClick;
-            _calibrationStopButton = new Button { Text = "停止 / 自动", Width = 100, Enabled = false };
+            _calibrationStopButton = new Button { Text = "停止 / 自动", Width = 104, Height = 32, Enabled = false };
+            StyleButton(_calibrationStopButton, Color.FromArgb(255, 232, 232), Color.FromArgb(165, 35, 35));
             _calibrationStopButton.Click += delegate { StopCalibration("Stopped by user"); };
-            Button presetCalButton = new Button { Text = "预设标定(12点)", Width = 115, Enabled = true };
+            Button presetCalButton = new Button { Text = "预设标定 12 点", Width = 120, Height = 32, Enabled = true };
+            StyleButton(presetCalButton, Color.FromArgb(232, 237, 244), UiText);
             presetCalButton.Click += StartPresetCalibration;
             controls.Controls.Add(_calibrationStartButton);
             controls.Controls.Add(_calibrationStopButton);
@@ -53,36 +102,79 @@ namespace X15FanControl
 
             _calibrationStatusLabel = new Label
             {
-                Dock = DockStyle.Top,
-                Height = 85,
+                Dock = DockStyle.Fill,
                 Text = "校准将写入固定的风扇占空比。另一个风扇保持自动模式。仅在温度较低且无其他风扇工具运行时开始。",
-                ForeColor = Color.DarkRed,
-                Padding = new Padding(0, 12, 0, 0)
+                ForeColor = Color.FromArgb(146, 64, 14),
+                BackColor = Color.FromArgb(255, 247, 230),
+                Padding = new Padding(12),
+                TextAlign = ContentAlignment.TopLeft
             };
 
-            setup.Controls.Add(_calibrationStatusLabel);
-            setup.Controls.Add(controls);
-            setup.Controls.Add(form);
+            setupLayout.Controls.Add(form, 0, 1);
+            setupLayout.Controls.Add(controls, 0, 2);
+            setupLayout.Controls.Add(_calibrationStatusLabel, 0, 3);
+            setup.Controls.Add(setupLayout);
 
-            GroupBox records = new GroupBox { Text = "观测记录", Dock = DockStyle.Fill, Padding = new Padding(10) };
-            _calibrationRecordsList = new ListBox { Dock = DockStyle.Fill };
-            FlowLayoutPanel marking = new FlowLayoutPanel { Dock = DockStyle.Bottom, Height = 42, Padding = new Padding(0, 7, 0, 0) };
-            _calibrationMarkNoisyButton = new Button { Text = "标记当前为嘈杂", Width = 140, Enabled = false };
+            Panel records = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Margin = new Padding(6, 0, 0, 0),
+                Padding = new Padding(16),
+                BackColor = UiSurface
+            };
+            TableLayoutPanel recordsLayout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 3,
+                BackColor = UiSurface
+            };
+            recordsLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+            recordsLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            recordsLayout.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
+            recordsLayout.Controls.Add(BuildSectionTitle("观测记录", UiGpuAccent), 0, 0);
+
+            _calibrationRecordsList = new ListBox
+            {
+                Dock = DockStyle.Fill,
+                BorderStyle = BorderStyle.FixedSingle,
+                BackColor = Color.FromArgb(249, 250, 252),
+                ForeColor = UiText,
+                Font = new Font("Segoe UI", 9.5F),
+                IntegralHeight = false
+            };
+            FlowLayoutPanel marking = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                Padding = new Padding(0, 10, 0, 0),
+                WrapContents = false,
+                FlowDirection = FlowDirection.LeftToRight,
+                BackColor = UiSurface
+            };
+            _calibrationMarkNoisyButton = new Button { Text = "标记嘈杂", Width = 104, Height = 32, Enabled = false };
+            StyleButton(_calibrationMarkNoisyButton, Color.FromArgb(255, 235, 232), Color.FromArgb(166, 44, 36));
             _calibrationMarkNoisyButton.Click += delegate { MarkCalibrationPoint(true); };
-            _calibrationMarkStableButton = new Button { Text = "标记当前为稳定", Width = 140, Enabled = false };
+            _calibrationMarkStableButton = new Button { Text = "标记稳定", Width = 104, Height = 32, Enabled = false };
+            StyleButton(_calibrationMarkStableButton, Color.FromArgb(229, 247, 236), Color.FromArgb(25, 110, 64));
             _calibrationMarkStableButton.Click += delegate { MarkCalibrationPoint(false); };
-            _calibrationGenerateZoneButton = new Button { Text = "生成稳定区间", Width = 150 };
+            _calibrationGenerateZoneButton = new Button { Text = "生成稳定区间", Width = 120, Height = 32 };
+            StyleButton(_calibrationGenerateZoneButton, UiGpuAccent, Color.White);
             _calibrationGenerateZoneButton.Click += CalibrationGenerateZoneButtonClick;
             marking.Controls.Add(_calibrationMarkNoisyButton);
             marking.Controls.Add(_calibrationMarkStableButton);
             marking.Controls.Add(_calibrationGenerateZoneButton);
-            records.Controls.Add(_calibrationRecordsList);
-            records.Controls.Add(marking);
+            recordsLayout.Controls.Add(_calibrationRecordsList, 0, 1);
+            recordsLayout.Controls.Add(marking, 0, 2);
+            records.Controls.Add(recordsLayout);
 
             Label footer = new Label
             {
                 Dock = DockStyle.Fill,
                 TextAlign = ContentAlignment.MiddleLeft,
+                BackColor = Color.FromArgb(255, 247, 230),
+                ForeColor = Color.FromArgb(130, 70, 20),
+                Padding = new Padding(12, 0, 12, 0),
+                Margin = new Padding(0, 6, 0, 0),
                 Text = "紧急规则：当 CPU ≥ 85°C、GPU ≥ 80°C、传感器读数无效或发生异常时，扫描停止且两个风扇均恢复自动模式。"
             };
 
@@ -94,15 +186,46 @@ namespace X15FanControl
             return tab;
         }
 
+        private static Control BuildSectionTitle(string title, Color accentColor)
+        {
+            Panel header = new Panel { Dock = DockStyle.Fill, BackColor = UiSurface };
+            header.Controls.Add(new Label
+            {
+                Text = title,
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(12, 0, 0, 0),
+                ForeColor = UiText,
+                Font = new Font("Segoe UI Semibold", 11F)
+            });
+            header.Controls.Add(new Panel { Dock = DockStyle.Left, Width = 4, BackColor = accentColor });
+            return header;
+        }
+
         private static NumericUpDown CreateNumeric(decimal minimum, decimal maximum, decimal value)
         {
-            return new NumericUpDown { Minimum = minimum, Maximum = maximum, Value = value, Dock = DockStyle.Fill };
+            return new NumericUpDown
+            {
+                Minimum = minimum,
+                Maximum = maximum,
+                Value = value,
+                Dock = DockStyle.Fill,
+                Margin = new Padding(4, 5, 4, 5),
+                Font = new Font("Segoe UI", 9.5F)
+            };
         }
 
         private static void AddFormRow(TableLayoutPanel form, int row, string label, Control control)
         {
-            form.RowStyles.Add(new RowStyle(SizeType.Absolute, 34));
-            form.Controls.Add(new Label { Text = label, TextAlign = ContentAlignment.MiddleLeft, Dock = DockStyle.Fill }, 0, row);
+            form.RowStyles.Add(new RowStyle(SizeType.Absolute, 39));
+            form.Controls.Add(new Label
+            {
+                Text = label,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Dock = DockStyle.Fill,
+                ForeColor = UiMuted,
+                Padding = new Padding(4, 0, 0, 0)
+            }, 0, row);
             form.Controls.Add(control, 1, row);
         }
 
