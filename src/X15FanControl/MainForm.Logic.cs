@@ -819,34 +819,31 @@ namespace X15FanControl
                                            !_lastGpuTelemetry.IsStale;
             bool decisionAvailable = decision?.Cpu != null && decision?.Gpu != null;
 
-            SetLabelText(_cpuTempLabel, PadDashboardValue(
-                snapshot.CpuTemperatureC > 0 ? snapshot.CpuTemperatureC + " °C" : "—", 6));
-            SetLabelText(_cpuFilteredLabel, PadDashboardValue(
-                decisionAvailable ? decision.Cpu.ControlTemperatureC.ToString("0.0") + " °C" : "—", 8));
-            SetLabelText(_cpuDutyLabel, PadDashboardValue(snapshot.CpuDutyPercent + "%", 4));
-            SetLabelText(_cpuTargetLabel, PadDashboardValue(
-                decisionAvailable ? decision.Cpu.AppliedPercent.ToString("0.0") + "%" : "—", 6));
-            SetLabelText(_cpuRpmLabel, PadDashboardValue(
-                snapshot.CpuRpm > 0 ? snapshot.CpuRpm.ToString() : "—", 5));
+            SetLabelText(_cpuTempLabel,
+                snapshot.CpuTemperatureC > 0 ? snapshot.CpuTemperatureC.ToString() : "—");
+            SetLabelText(_cpuFilteredLabel,
+                decisionAvailable ? decision.Cpu.ControlTemperatureC.ToString("0.0") : "—");
+            SetLabelText(_cpuDutyLabel, snapshot.CpuDutyPercent.ToString());
+            SetLabelText(_cpuTargetLabel,
+                decisionAvailable ? decision.Cpu.AppliedPercent.ToString("0.0") : "—");
+            SetLabelText(_cpuRpmLabel,
+                snapshot.CpuRpm > 0 ? snapshot.CpuRpm.ToString() : "—");
 
-            SetLabelText(_gpuTempLabel, PadDashboardValue(
-                gpuTemperatureAvailable ? snapshot.GpuTemperatureC + " °C" : "—", 6));
-            SetLabelText(_gpuFilteredLabel, PadDashboardValue(
-                decisionAvailable ? decision.Gpu.ControlTemperatureC.ToString("0.0") + " °C" : "—", 8));
-            SetLabelText(_gpuDutyLabel, PadDashboardValue(snapshot.GpuDutyPercent + "%", 4));
-            SetLabelText(_gpuTargetLabel, PadDashboardValue(
-                decisionAvailable ? decision.Gpu.AppliedPercent.ToString("0.0") + "%" : "—", 6));
-            SetLabelText(_gpuRpmLabel, PadDashboardValue(
-                snapshot.GpuRpm > 0 ? snapshot.GpuRpm.ToString() : "—", 5));
+            SetLabelText(_gpuTempLabel,
+                gpuTemperatureAvailable ? snapshot.GpuTemperatureC.ToString() : "—");
+            SetLabelText(_gpuFilteredLabel,
+                decisionAvailable ? decision.Gpu.ControlTemperatureC.ToString("0.0") : "—");
+            SetLabelText(_gpuDutyLabel, snapshot.GpuDutyPercent.ToString());
+            SetLabelText(_gpuTargetLabel,
+                decisionAvailable ? decision.Gpu.AppliedPercent.ToString("0.0") : "—");
+            SetLabelText(_gpuRpmLabel,
+                snapshot.GpuRpm > 0 ? snapshot.GpuRpm.ToString() : "—");
 
-            Color gpuTemperatureColor = gpuTemperatureAvailable ? Color.Black : Color.Gray;
+            Color gpuTemperatureColor = gpuTemperatureAvailable
+                ? _gpuRpmLabel.ForeColor
+                : Color.Gray;
             if (_gpuTempLabel.ForeColor != gpuTemperatureColor)
                 _gpuTempLabel.ForeColor = gpuTemperatureColor;
-        }
-
-        private static string PadDashboardValue(string value, int width)
-        {
-            return (value ?? "—").PadLeft(width);
         }
 
         private static void SetLabelText(Label label, string text)
@@ -990,12 +987,15 @@ namespace X15FanControl
 
         private void AddHistoryPoint(string seriesName, double value)
         {
-            if (_historyChart == null)
+            var chart = seriesName.StartsWith("CPU ", StringComparison.Ordinal)
+                ? _cpuHistoryChart
+                : _gpuHistoryChart;
+            if (chart == null || chart.Series.IndexOf(seriesName) < 0)
             {
                 return;
             }
 
-            var series = _historyChart.Series[seriesName];
+            var series = chart.Series[seriesName];
             series.Points.AddY(value);
             while (series.Points.Count > 150)
             {

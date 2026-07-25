@@ -109,7 +109,8 @@ namespace X15FanControl
         private Label _gpuRpmLabel;
         private GroupBox _cpuCardBox;
         private GroupBox _gpuCardBox;
-        private Chart _historyChart;
+        private Chart _cpuHistoryChart;
+        private Chart _gpuHistoryChart;
         private TextBox _logTextBox;
         private PropertyGrid _profilePropertyGrid;
         private PropertyGrid _cpuPropertyGrid;
@@ -673,22 +674,59 @@ namespace X15FanControl
 
         private TabPage BuildDashboardTab()
         {
-            TabPage tab = new TabPage("仪表盘");
-            TableLayoutPanel root = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 3, Padding = new Padding(10) };
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 175));
+            Color pageColor = Color.FromArgb(244, 247, 251);
+            Color cpuAccent = Color.FromArgb(42, 112, 232);
+            Color gpuAccent = Color.FromArgb(124, 82, 214);
+
+            TabPage tab = new TabPage("仪表盘") { BackColor = pageColor };
+            TableLayoutPanel root = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 2,
+                Padding = new Padding(12),
+                BackColor = pageColor
+            };
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 58));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
 
-            TableLayoutPanel cards = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 2, RowCount = 1 };
+            TableLayoutPanel cards = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 1,
+                BackColor = pageColor
+            };
             cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
             cards.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            cards.Controls.Add(BuildFanCard("CPU", out _cpuTempLabel, out _cpuFilteredLabel, out _cpuDutyLabel, out _cpuTargetLabel, out _cpuRpmLabel, out _cpuCardBox), 0, 0);
-            cards.Controls.Add(BuildFanCard("GPU", out _gpuTempLabel, out _gpuFilteredLabel, out _gpuDutyLabel, out _gpuTargetLabel, out _gpuRpmLabel, out _gpuCardBox), 1, 0);
 
-            _historyChart = BuildHistoryChart();
+            GroupBox cpuCard = BuildFanDashboardCard(
+                "CPU", cpuAccent,
+                out _cpuTempLabel, out _cpuFilteredLabel, out _cpuDutyLabel,
+                out _cpuTargetLabel, out _cpuRpmLabel, out _cpuCardBox,
+                out _cpuHistoryChart);
+            cpuCard.Margin = new Padding(0, 0, 6, 0);
+
+            GroupBox gpuCard = BuildFanDashboardCard(
+                "GPU", gpuAccent,
+                out _gpuTempLabel, out _gpuFilteredLabel, out _gpuDutyLabel,
+                out _gpuTargetLabel, out _gpuRpmLabel, out _gpuCardBox,
+                out _gpuHistoryChart);
+            gpuCard.Margin = new Padding(6, 0, 0, 0);
+
+            cards.Controls.Add(cpuCard, 0, 0);
+            cards.Controls.Add(gpuCard, 1, 0);
 
             // 底部状态栏：硬件状态 + GPU遥测详情
-            TableLayoutPanel statusPanel = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 1, RowCount = 2 };
+            TableLayoutPanel statusPanel = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 2,
+                Padding = new Padding(10, 4, 10, 2),
+                Margin = new Padding(0, 8, 0, 0),
+                BackColor = Color.White
+            };
             statusPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
             statusPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
             _hardwareStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, Text = "硬件：初始化中…" };
@@ -708,71 +746,243 @@ namespace X15FanControl
             telemetryPanel.Controls.Add(_gpuNvidiaPowerLabel);
             telemetryPanel.Controls.Add(new Label { Text = " | P-State: ", AutoSize = true, ForeColor = Color.DimGray });
             _gpuNvidiaPStateLabel = new Label { Text = "—", AutoSize = true };
+            telemetryPanel.Controls.Add(_gpuNvidiaPStateLabel);
 
             statusPanel.Controls.Add(_hardwareStatusLabel, 0, 0);
             statusPanel.Controls.Add(telemetryPanel, 0, 1);
 
             root.Controls.Add(cards, 0, 0);
-            root.Controls.Add(_historyChart, 0, 1);
-            root.Controls.Add(statusPanel, 0, 2);
+            root.Controls.Add(statusPanel, 0, 1);
             tab.Controls.Add(root);
             return tab;
         }
 
-        private GroupBox BuildFanCard(string title, out Label temperature, out Label filtered, out Label duty, out Label target, out Label rpm, out GroupBox boxRef)
+        private GroupBox BuildFanDashboardCard(
+            string title,
+            Color accentColor,
+            out Label temperature,
+            out Label filtered,
+            out Label duty,
+            out Label target,
+            out Label rpm,
+            out GroupBox boxRef,
+            out Chart historyChart)
         {
-            GroupBox box = new GroupBox { Text = title, Dock = DockStyle.Fill, Padding = new Padding(12) };
-            boxRef = box;
-            TableLayoutPanel grid = new TableLayoutPanel { Dock = DockStyle.Fill, ColumnCount = 5, RowCount = 2 };
-            for (int i = 0; i < 5; i++) grid.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 20));
-            grid.RowStyles.Add(new RowStyle(SizeType.Absolute, 38));
-            grid.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-
-            string[] headings = { "实时温度", "平滑温度", "当前输出", "目标输出", "风扇转速" };
-            Label[] values = new Label[5];
-            for (int i = 0; i < headings.Length; i++)
+            GroupBox box = new GroupBox
             {
-                grid.Controls.Add(new Label { Text = headings[i], Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.DimGray }, i, 0);
-                values[i] = new StableValueLabel
-                {
-                    Text = "—",
-                    Dock = DockStyle.Fill,
-                    TextAlign = ContentAlignment.MiddleCenter,
-                    Font = new Font("Consolas", 17F, FontStyle.Bold)
-                };
-                grid.Controls.Add(values[i], i, 1);
-            }
+                Text = title,
+                Dock = DockStyle.Fill,
+                Padding = new Padding(12, 10, 12, 12),
+                BackColor = Color.White,
+                Font = new Font("Segoe UI Semibold", 9.5F)
+            };
+            boxRef = box;
+            TableLayoutPanel layout = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 2,
+                BackColor = Color.White
+            };
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 156));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-            temperature = values[0];
-            filtered = values[1];
-            duty = values[2];
-            target = values[3];
-            rpm = values[4];
-            box.Controls.Add(grid);
+            TableLayoutPanel metrics = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 2,
+                BackColor = Color.White
+            };
+            metrics.RowStyles.Add(new RowStyle(SizeType.Percent, 57));
+            metrics.RowStyles.Add(new RowStyle(SizeType.Percent, 43));
+
+            TableLayoutPanel primaryMetrics = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 1
+            };
+            primaryMetrics.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            primaryMetrics.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+            primaryMetrics.Controls.Add(
+                BuildMetricTile("实时温度", "°C", accentColor, true, out temperature), 0, 0);
+            primaryMetrics.Controls.Add(
+                BuildMetricTile("风扇转速", "RPM", accentColor, true, out rpm), 1, 0);
+
+            TableLayoutPanel secondaryMetrics = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 3,
+                RowCount = 1
+            };
+            secondaryMetrics.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.333F));
+            secondaryMetrics.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.333F));
+            secondaryMetrics.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 33.334F));
+            Color secondaryValueColor = Color.FromArgb(48, 58, 72);
+            secondaryMetrics.Controls.Add(
+                BuildMetricTile("平滑温度", "°C", secondaryValueColor, false, out filtered), 0, 0);
+            secondaryMetrics.Controls.Add(
+                BuildMetricTile("当前输出", "%", secondaryValueColor, false, out duty), 1, 0);
+            secondaryMetrics.Controls.Add(
+                BuildMetricTile("目标输出", "%", secondaryValueColor, false, out target), 2, 0);
+
+            metrics.Controls.Add(primaryMetrics, 0, 0);
+            metrics.Controls.Add(secondaryMetrics, 0, 1);
+
+            historyChart = BuildHistoryChart(
+                title + " 趋势",
+                title + " 温度",
+                title + " 设定",
+                accentColor);
+            layout.Controls.Add(metrics, 0, 0);
+            layout.Controls.Add(historyChart, 0, 1);
+
+            Panel accentBar = new Panel
+            {
+                Dock = DockStyle.Top,
+                Height = 4,
+                BackColor = accentColor
+            };
+            box.Controls.Add(layout);
+            box.Controls.Add(accentBar);
             return box;
         }
 
-        private Chart BuildHistoryChart()
+        private Control BuildMetricTile(
+            string caption,
+            string unit,
+            Color valueColor,
+            bool prominent,
+            out Label valueLabel)
         {
-            Chart chart = new Chart { Dock = DockStyle.Fill };
+            Color tileColor = prominent
+                ? Color.FromArgb(247, 250, 255)
+                : Color.FromArgb(247, 248, 250);
+            Panel tile = new Panel
+            {
+                Dock = DockStyle.Fill,
+                Margin = new Padding(4),
+                Padding = new Padding(8, 5, 8, 5),
+                BackColor = tileColor
+            };
+            TableLayoutPanel content = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 1,
+                RowCount = 2,
+                BackColor = tileColor
+            };
+            content.RowStyles.Add(new RowStyle(SizeType.Absolute, prominent ? 24 : 20));
+            content.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            content.Controls.Add(new Label
+            {
+                Text = caption,
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleCenter,
+                ForeColor = Color.FromArgb(102, 112, 128),
+                Font = new Font("Segoe UI", prominent ? 9.5F : 8.5F)
+            }, 0, 0);
+
+            TableLayoutPanel valueRow = new TableLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                ColumnCount = 2,
+                RowCount = 1,
+                BackColor = tileColor
+            };
+            valueRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 68));
+            valueRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 32));
+
+            valueLabel = new StableValueLabel
+            {
+                Text = "—",
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleRight,
+                ForeColor = valueColor,
+                BackColor = tileColor,
+                Font = new Font("Segoe UI Semibold", prominent ? 22F : 15.5F)
+            };
+            Label unitLabel = new Label
+            {
+                Text = unit,
+                Dock = DockStyle.Fill,
+                TextAlign = ContentAlignment.MiddleLeft,
+                Padding = new Padding(4, prominent ? 8 : 4, 0, 0),
+                ForeColor = valueColor,
+                BackColor = tileColor,
+                Font = new Font("Segoe UI Semibold", prominent ? 10F : 9F)
+            };
+            valueRow.Controls.Add(valueLabel, 0, 0);
+            valueRow.Controls.Add(unitLabel, 1, 0);
+            content.Controls.Add(valueRow, 0, 1);
+            tile.Controls.Add(content);
+            return tile;
+        }
+
+        private Chart BuildHistoryChart(
+            string title,
+            string temperatureSeriesName,
+            string targetSeriesName,
+            Color accentColor)
+        {
+            Chart chart = new Chart
+            {
+                Dock = DockStyle.Fill,
+                BackColor = Color.White,
+                Margin = new Padding(4, 8, 4, 0)
+            };
             ChartArea area = new ChartArea("History");
+            area.BackColor = Color.White;
             area.AxisX.LabelStyle.Enabled = false;
             area.AxisY.Minimum = 0;
             area.AxisY.Maximum = 105;
+            area.AxisY.Interval = 20;
             area.AxisY.Title = "°C / %";
             area.AxisX.MajorGrid.Enabled = false;
+            area.AxisX.LineColor = Color.FromArgb(210, 216, 224);
+            area.AxisY.LineColor = Color.FromArgb(210, 216, 224);
+            area.AxisY.MajorGrid.LineColor = Color.FromArgb(229, 233, 239);
+            area.AxisY.MajorGrid.LineDashStyle = ChartDashStyle.Dot;
+            area.AxisY.LabelStyle.ForeColor = Color.FromArgb(100, 110, 124);
+            area.AxisY.TitleForeColor = Color.FromArgb(100, 110, 124);
             chart.ChartAreas.Add(area);
-            chart.Legends.Add(new Legend("Legend") { Docking = Docking.Top });
-            AddSeries(chart, "CPU 温度", SeriesChartType.FastLine);
-            AddSeries(chart, "GPU 温度", SeriesChartType.FastLine);
-            AddSeries(chart, "CPU 设定", SeriesChartType.StepLine);
-            AddSeries(chart, "GPU 设定", SeriesChartType.StepLine);
+            chart.Legends.Add(new Legend("Legend")
+            {
+                Docking = Docking.Top,
+                Alignment = StringAlignment.Far,
+                BackColor = Color.Transparent,
+                Font = new Font("Segoe UI", 8.5F)
+            });
+            chart.Titles.Add(new Title(title)
+            {
+                Alignment = ContentAlignment.TopLeft,
+                Font = new Font("Segoe UI Semibold", 10F),
+                ForeColor = Color.FromArgb(55, 65, 81)
+            });
+            AddSeries(chart, temperatureSeriesName, "温度", SeriesChartType.FastLine, accentColor, ChartDashStyle.Solid);
+            AddSeries(chart, targetSeriesName, "目标输出", SeriesChartType.StepLine,
+                Color.FromArgb(239, 126, 56), ChartDashStyle.Dash);
             return chart;
         }
 
-        private static void AddSeries(Chart chart, string name, SeriesChartType chartType)
+        private static void AddSeries(
+            Chart chart,
+            string name,
+            string legendText,
+            SeriesChartType chartType,
+            Color color,
+            ChartDashStyle dashStyle)
         {
-            Series series = new Series(name) { ChartType = chartType, BorderWidth = 2, ChartArea = "History" };
+            Series series = new Series(name)
+            {
+                LegendText = legendText,
+                ChartType = chartType,
+                BorderWidth = 2,
+                BorderDashStyle = dashStyle,
+                Color = color,
+                ChartArea = "History"
+            };
             chart.Series.Add(series);
         }
 
