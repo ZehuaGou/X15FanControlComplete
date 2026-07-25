@@ -997,18 +997,31 @@ namespace X15FanControl
             TableLayoutPanel valueRow = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
-                ColumnCount = 2,
+                ColumnCount = 1,
                 RowCount = 1,
                 BackColor = tileColor
             };
-            valueRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 68));
-            valueRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 32));
+            valueRow.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+
+            FlowLayoutPanel valueGroup = new FlowLayoutPanel
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                Anchor = AnchorStyles.None,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                Margin = Padding.Empty,
+                Padding = Padding.Empty,
+                BackColor = tileColor
+            };
 
             valueLabel = new StableValueLabel
             {
                 Text = "—",
-                Dock = DockStyle.Fill,
-                TextAlign = ContentAlignment.MiddleRight,
+                AutoSize = true,
+                Anchor = AnchorStyles.None,
+                TextAlign = ContentAlignment.MiddleCenter,
+                Margin = Padding.Empty,
                 ForeColor = valueColor,
                 BackColor = tileColor,
                 Font = new Font("Segoe UI Semibold", prominent ? 22F : 15.5F)
@@ -1016,15 +1029,18 @@ namespace X15FanControl
             Label unitLabel = new Label
             {
                 Text = unit,
-                Dock = DockStyle.Fill,
+                AutoSize = true,
+                Anchor = AnchorStyles.None,
                 TextAlign = ContentAlignment.MiddleLeft,
                 Padding = new Padding(4, prominent ? 8 : 4, 0, 0),
+                Margin = Padding.Empty,
                 ForeColor = valueColor,
                 BackColor = tileColor,
                 Font = new Font("Segoe UI Semibold", prominent ? 10F : 9F)
             };
-            valueRow.Controls.Add(valueLabel, 0, 0);
-            valueRow.Controls.Add(unitLabel, 1, 0);
+            valueGroup.Controls.Add(valueLabel);
+            valueGroup.Controls.Add(unitLabel);
+            valueRow.Controls.Add(valueGroup, 0, 0);
             content.Controls.Add(valueRow, 0, 1);
             tile.Controls.Add(content);
             return tile;
