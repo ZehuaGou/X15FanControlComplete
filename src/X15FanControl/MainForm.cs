@@ -24,7 +24,6 @@ namespace X15FanControl
         private readonly string _heartbeatPath;
         private readonly string _watchdogLogPath;
         private readonly System.Windows.Forms.Timer _mainTimer;
-        private readonly System.Windows.Forms.Timer _dashboardAnimationTimer;
 
         // Background control loop (separate from UI thread)
         private System.Threading.CancellationTokenSource _controlCts;
@@ -71,25 +70,6 @@ namespace X15FanControl
 
         // Chart downsampling
         private DateTime _lastChartSampleUtc = DateTime.MinValue;
-
-        // Dashboard transition is presentation-only. Values switch atomically at the fade midpoint.
-        private const int DashboardTransitionDurationMs = 180;
-        private bool _dashboardAnimationInitialized;
-        private DateTime _dashboardAnimationStartedUtc;
-        private bool _dashboardAnimationTextSwitched;
-        private int _dashboardAnimationChangedMask;
-        private DashboardDisplayValues _dashboardAnimationCurrent;
-        private DashboardDisplayValues _dashboardAnimationTarget;
-        private bool _displayCpuTemperature;
-        private bool _displayGpuTemperature;
-        private bool _displayCpuRpm;
-        private bool _displayGpuRpm;
-        private bool _displayDecisionValues;
-        private bool _targetDisplayCpuTemperature;
-        private bool _targetDisplayGpuTemperature;
-        private bool _targetDisplayCpuRpm;
-        private bool _targetDisplayGpuRpm;
-        private bool _targetDisplayDecisionValues;
 
         // Thread safety
         private readonly object _engineLock = new object();
@@ -188,8 +168,6 @@ namespace X15FanControl
 
             _mainTimer = new Timer();
             _mainTimer.Tick += MainTimerTick;
-            _dashboardAnimationTimer = new Timer { Interval = 33 };
-            _dashboardAnimationTimer.Tick += DashboardAnimationTick;
 
             Load += MainFormLoad;
             Shown += MainForm_Shown;
@@ -438,10 +416,6 @@ namespace X15FanControl
             ShowInTaskbar = true;
             Show();
             WindowState = FormWindowState.Normal;
-            if (_dashboardAnimationInitialized && DashboardTransitionPending())
-            {
-                CompleteDashboardTransition();
-            }
             Invalidate(true);
             Activate();
             BringToFront();
@@ -465,7 +439,6 @@ namespace X15FanControl
                 NotifyCalibrationWindowActionStopped();
             }
 
-            _dashboardAnimationTimer.Stop();
             Hide();
             // Hide first: changing ShowInTaskbar while visible recreates the native handle
             // and briefly exposes an unpainted white client area.
@@ -509,18 +482,16 @@ namespace X15FanControl
             Close();
         }
 
-        private struct DashboardDisplayValues
+        private sealed class StableValueLabel : Label
         {
-            public double CpuTemperature;
-            public double GpuTemperature;
-            public double CpuDuty;
-            public double GpuDuty;
-            public double CpuRpm;
-            public double GpuRpm;
-            public double CpuFilteredTemperature;
-            public double GpuFilteredTemperature;
-            public double CpuTarget;
-            public double GpuTarget;
+            public StableValueLabel()
+            {
+                SetStyle(ControlStyles.AllPaintingInWmPaint |
+                         ControlStyles.OptimizedDoubleBuffer |
+                         ControlStyles.UserPaint, true);
+                DoubleBuffered = true;
+                UseCompatibleTextRendering = false;
+            }
         }
 
         private bool IsStartupTaskRegistered()
@@ -762,7 +733,13 @@ namespace X15FanControl
             for (int i = 0; i < headings.Length; i++)
             {
                 grid.Controls.Add(new Label { Text = headings[i], Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, ForeColor = Color.DimGray }, i, 0);
-                values[i] = new Label { Text = "—", Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleCenter, Font = new Font("Segoe UI Semibold", 18F) };
+                values[i] = new StableValueLabel
+                {
+                    Text = "—",
+                    Dock = DockStyle.Fill,
+                    TextAlign = ContentAlignment.MiddleCenter,
+                    Font = new Font("Consolas", 17F, FontStyle.Bold)
+                };
                 grid.Controls.Add(values[i], i, 1);
             }
 

@@ -693,7 +693,7 @@ namespace X15FanControl
 
         private void UpdateDashboard(FanSnapshot snapshot, ControlDecision decision)
         {
-            SetDashboardAnimationTarget(snapshot, decision);
+            UpdateDashboardValues(snapshot, decision);
 
             // CPU控制状态
             string cpuStateStr = "—";
@@ -812,243 +812,41 @@ namespace X15FanControl
             // 图表点已由UI Timer独立添加，此处不再调用AddHistoryPoint
         }
 
-        private void SetDashboardAnimationTarget(FanSnapshot snapshot, ControlDecision decision)
+        private void UpdateDashboardValues(FanSnapshot snapshot, ControlDecision decision)
         {
-            if (_dashboardAnimationTimer.Enabled)
-            {
-                CompleteDashboardTransition();
-            }
-
-            _targetDisplayCpuTemperature = snapshot.CpuTemperatureC > 0;
-            _targetDisplayGpuTemperature = _gpuTelemetryReady &&
+            bool gpuTemperatureAvailable = _gpuTelemetryReady &&
                                            _lastGpuTelemetry != null &&
                                            !_lastGpuTelemetry.IsStale;
-            _targetDisplayCpuRpm = snapshot.CpuRpm > 0;
-            _targetDisplayGpuRpm = snapshot.GpuRpm > 0;
-            _targetDisplayDecisionValues = decision?.Cpu != null && decision?.Gpu != null;
+            bool decisionAvailable = decision?.Cpu != null && decision?.Gpu != null;
 
-            DashboardDisplayValues target = new DashboardDisplayValues
-            {
-                CpuTemperature = snapshot.CpuTemperatureC,
-                GpuTemperature = snapshot.GpuTemperatureC,
-                CpuDuty = snapshot.CpuDutyPercent,
-                GpuDuty = snapshot.GpuDutyPercent,
-                CpuRpm = snapshot.CpuRpm,
-                GpuRpm = snapshot.GpuRpm,
-                CpuFilteredTemperature = _targetDisplayDecisionValues ? decision.Cpu.ControlTemperatureC : 0,
-                GpuFilteredTemperature = _targetDisplayDecisionValues ? decision.Gpu.ControlTemperatureC : 0,
-                CpuTarget = _targetDisplayDecisionValues ? decision.Cpu.AppliedPercent : 0,
-                GpuTarget = _targetDisplayDecisionValues ? decision.Gpu.AppliedPercent : 0
-            };
+            SetLabelText(_cpuTempLabel, PadDashboardValue(
+                snapshot.CpuTemperatureC > 0 ? snapshot.CpuTemperatureC + " °C" : "—", 6));
+            SetLabelText(_cpuFilteredLabel, PadDashboardValue(
+                decisionAvailable ? decision.Cpu.ControlTemperatureC.ToString("0.0") + " °C" : "—", 8));
+            SetLabelText(_cpuDutyLabel, PadDashboardValue(snapshot.CpuDutyPercent + "%", 4));
+            SetLabelText(_cpuTargetLabel, PadDashboardValue(
+                decisionAvailable ? decision.Cpu.AppliedPercent.ToString("0.0") + "%" : "—", 6));
+            SetLabelText(_cpuRpmLabel, PadDashboardValue(
+                snapshot.CpuRpm > 0 ? snapshot.CpuRpm.ToString() : "—", 5));
 
-            if (!_dashboardAnimationInitialized)
-            {
-                _dashboardAnimationInitialized = true;
-                _dashboardAnimationCurrent = target;
-                _dashboardAnimationTarget = target;
-                ApplyTargetDisplayAvailability();
-                _dashboardAnimationStartedUtc = DateTime.UtcNow;
-                RenderDashboardValues();
-                _dashboardAnimationChangedMask = (1 << 10) - 1;
-                ApplyDashboardLabelOpacity(1.0);
-                _dashboardAnimationChangedMask = 0;
-                return;
-            }
+            SetLabelText(_gpuTempLabel, PadDashboardValue(
+                gpuTemperatureAvailable ? snapshot.GpuTemperatureC + " °C" : "—", 6));
+            SetLabelText(_gpuFilteredLabel, PadDashboardValue(
+                decisionAvailable ? decision.Gpu.ControlTemperatureC.ToString("0.0") + " °C" : "—", 8));
+            SetLabelText(_gpuDutyLabel, PadDashboardValue(snapshot.GpuDutyPercent + "%", 4));
+            SetLabelText(_gpuTargetLabel, PadDashboardValue(
+                decisionAvailable ? decision.Gpu.AppliedPercent.ToString("0.0") + "%" : "—", 6));
+            SetLabelText(_gpuRpmLabel, PadDashboardValue(
+                snapshot.GpuRpm > 0 ? snapshot.GpuRpm.ToString() : "—", 5));
 
-            _dashboardAnimationTarget = target;
-            _dashboardAnimationChangedMask = BuildDashboardTransitionMask();
-            if (!DashboardTransitionPending())
-            {
-                _dashboardAnimationTimer.Stop();
-                return;
-            }
-            if (!Visible || !ShowInTaskbar || WindowState == FormWindowState.Minimized)
-            {
-                CompleteDashboardTransition();
-                return;
-            }
-
-            // Do not count through intermediate values. Fade the old text, switch once,
-            // then fade the final sampled value back in.
-            _dashboardAnimationTextSwitched = false;
-            _dashboardAnimationStartedUtc = DateTime.UtcNow;
-            ApplyDashboardLabelOpacity(1.0);
-            _dashboardAnimationTimer.Start();
+            Color gpuTemperatureColor = gpuTemperatureAvailable ? Color.Black : Color.Gray;
+            if (_gpuTempLabel.ForeColor != gpuTemperatureColor)
+                _gpuTempLabel.ForeColor = gpuTemperatureColor;
         }
 
-        private void DashboardAnimationTick(object sender, EventArgs e)
+        private static string PadDashboardValue(string value, int width)
         {
-            if (_closing || !_dashboardAnimationInitialized ||
-                !Visible || !ShowInTaskbar || WindowState == FormWindowState.Minimized)
-            {
-                return;
-            }
-
-            double progress = (DateTime.UtcNow - _dashboardAnimationStartedUtc).TotalMilliseconds /
-                              DashboardTransitionDurationMs;
-            progress = Math.Max(0.0, Math.Min(1.0, progress));
-
-            if (progress < 0.5)
-            {
-                ApplyDashboardLabelOpacity(1.0 - (progress * 2.0));
-                return;
-            }
-
-            if (!_dashboardAnimationTextSwitched)
-            {
-                ApplyDashboardLabelOpacity(0.0);
-                _dashboardAnimationCurrent = _dashboardAnimationTarget;
-                ApplyTargetDisplayAvailability();
-                RenderDashboardValues();
-                _dashboardAnimationTextSwitched = true;
-                return;
-            }
-
-            ApplyDashboardLabelOpacity((progress - 0.5) * 2.0);
-            if (progress >= 1.0)
-            {
-                CompleteDashboardTransition();
-            }
-        }
-
-        private bool DashboardTransitionPending()
-        {
-            return _dashboardAnimationChangedMask != 0;
-        }
-
-        private void CompleteDashboardTransition()
-        {
-            _dashboardAnimationCurrent = _dashboardAnimationTarget;
-            ApplyTargetDisplayAvailability();
-            RenderDashboardValues();
-            ApplyDashboardLabelOpacity(1.0);
-            _dashboardAnimationTextSwitched = true;
-            _dashboardAnimationTimer.Stop();
-            _dashboardAnimationChangedMask = 0;
-        }
-
-        private void ApplyTargetDisplayAvailability()
-        {
-            _displayCpuTemperature = _targetDisplayCpuTemperature;
-            _displayGpuTemperature = _targetDisplayGpuTemperature;
-            _displayCpuRpm = _targetDisplayCpuRpm;
-            _displayGpuRpm = _targetDisplayGpuRpm;
-            _displayDecisionValues = _targetDisplayDecisionValues;
-        }
-
-        private int BuildDashboardTransitionMask()
-        {
-            string[] currentTexts = FormatDashboardValues(
-                _dashboardAnimationCurrent,
-                _displayCpuTemperature,
-                _displayGpuTemperature,
-                _displayCpuRpm,
-                _displayGpuRpm,
-                _displayDecisionValues);
-            string[] targetTexts = FormatDashboardValues(
-                _dashboardAnimationTarget,
-                _targetDisplayCpuTemperature,
-                _targetDisplayGpuTemperature,
-                _targetDisplayCpuRpm,
-                _targetDisplayGpuRpm,
-                _targetDisplayDecisionValues);
-
-            int changedMask = 0;
-            for (int i = 0; i < currentTexts.Length; i++)
-            {
-                if (!string.Equals(currentTexts[i], targetTexts[i], StringComparison.Ordinal))
-                    changedMask |= 1 << i;
-            }
-            return changedMask;
-        }
-
-        private void ApplyDashboardLabelOpacity(double opacity)
-        {
-            opacity = Math.Max(0.0, Math.Min(1.0, opacity));
-            Label[] labels = GetDashboardValueLabels();
-
-            for (int i = 0; i < labels.Length; i++)
-            {
-                if ((_dashboardAnimationChangedMask & (1 << i)) == 0)
-                    continue;
-
-                Label label = labels[i];
-                if (label == null)
-                    continue;
-
-                Color targetColor = label == _gpuTempLabel && !_displayGpuTemperature
-                    ? Color.Gray
-                    : SystemColors.ControlText;
-                Color backgroundColor = label.Parent?.BackColor ?? SystemColors.Control;
-                if (backgroundColor.A < 255)
-                    backgroundColor = SystemColors.Control;
-                label.ForeColor = BlendColor(backgroundColor, targetColor, opacity);
-            }
-        }
-
-        private static Color BlendColor(Color from, Color to, double amount)
-        {
-            amount = Math.Max(0.0, Math.Min(1.0, amount));
-            return Color.FromArgb(
-                (int)Math.Round(from.R + ((to.R - from.R) * amount)),
-                (int)Math.Round(from.G + ((to.G - from.G) * amount)),
-                (int)Math.Round(from.B + ((to.B - from.B) * amount)));
-        }
-
-        private void RenderDashboardValues()
-        {
-            string[] texts = FormatDashboardValues(
-                _dashboardAnimationCurrent,
-                _displayCpuTemperature,
-                _displayGpuTemperature,
-                _displayCpuRpm,
-                _displayGpuRpm,
-                _displayDecisionValues);
-            Label[] labels = GetDashboardValueLabels();
-            for (int i = 0; i < labels.Length; i++)
-            {
-                SetLabelText(labels[i], texts[i]);
-            }
-        }
-
-        private Label[] GetDashboardValueLabels()
-        {
-            return new[]
-            {
-                _cpuTempLabel,
-                _cpuFilteredLabel,
-                _cpuDutyLabel,
-                _cpuTargetLabel,
-                _cpuRpmLabel,
-                _gpuTempLabel,
-                _gpuFilteredLabel,
-                _gpuDutyLabel,
-                _gpuTargetLabel,
-                _gpuRpmLabel
-            };
-        }
-
-        private static string[] FormatDashboardValues(
-            DashboardDisplayValues values,
-            bool displayCpuTemperature,
-            bool displayGpuTemperature,
-            bool displayCpuRpm,
-            bool displayGpuRpm,
-            bool displayDecisionValues)
-        {
-            return new[]
-            {
-                displayCpuTemperature ? Math.Round(values.CpuTemperature).ToString("0") + " °C" : "—",
-                displayDecisionValues ? values.CpuFilteredTemperature.ToString("0.0") + " °C" : "—",
-                Math.Round(values.CpuDuty).ToString("0") + "%",
-                displayDecisionValues ? values.CpuTarget.ToString("0.0") + "%" : "—",
-                displayCpuRpm ? Math.Round(values.CpuRpm).ToString("0") : "—",
-                displayGpuTemperature ? Math.Round(values.GpuTemperature).ToString("0") + " °C" : "—",
-                displayDecisionValues ? values.GpuFilteredTemperature.ToString("0.0") + " °C" : "—",
-                Math.Round(values.GpuDuty).ToString("0") + "%",
-                displayDecisionValues ? values.GpuTarget.ToString("0.0") + "%" : "—",
-                displayGpuRpm ? Math.Round(values.GpuRpm).ToString("0") : "—"
-            };
+            return (value ?? "—").PadLeft(width);
         }
 
         private static void SetLabelText(Label label, string text)
@@ -1426,7 +1224,6 @@ namespace X15FanControl
             // 最小化按钮：窗口进入任务栏，不隐藏到托盘
             if (WindowState == FormWindowState.Minimized)
             {
-                _dashboardAnimationTimer.Stop();
                 if (_calibrationActive)
                 {
                     if (!StopCalibration("窗口最小化"))
@@ -1442,12 +1239,7 @@ namespace X15FanControl
 
                     NotifyCalibrationWindowActionStopped();
                 }
-
                 // ShowInTaskbar保持true，用户可点击任务栏恢复
-            }
-            else if (_dashboardAnimationInitialized && DashboardTransitionPending())
-            {
-                CompleteDashboardTransition();
             }
         }
 
@@ -1538,7 +1330,6 @@ namespace X15FanControl
             if (_closing) return;
             _closing = true;
             _mainTimer.Stop();
-            _dashboardAnimationTimer.Stop();
             _runMode = RunMode.ReadOnly;
 
             AppendLog("Control loop cancellation requested");
@@ -1599,7 +1390,6 @@ namespace X15FanControl
                 _notifyIcon.Dispose();
                 _notifyIcon = null;
             }
-            _dashboardAnimationTimer.Dispose();
             SystemEvents.PowerModeChanged -= SystemEventsPowerModeChanged;
 
             // 清理完成后再次Close；FormClosing通过_allowFinalClose明确放行。
