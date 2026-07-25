@@ -201,7 +201,7 @@ namespace X15FanControl
             }
 
             _runMode = requestedMode;
-            _engine?.Reset();
+            lock (_engineLock) { _engine?.Reset(); }
             _modeCombo.SelectedItem = _runMode;
             UpdateModeStatus();
             FlashModeBadge();
@@ -290,6 +290,10 @@ namespace X15FanControl
 
                     DateTime now = DateTime.UtcNow;
                     FanSnapshot snapshot = ReadSnapshot(now);
+
+                    // 退出检查：ReadSnapshot之后必须确认未请求退出
+                    if (_closing || token.IsCancellationRequested) break;
+
                     DetectSensorStalls(snapshot);
 
                     ControlDecision decision = null;
@@ -319,6 +323,8 @@ namespace X15FanControl
 
                         if (_runMode == RunMode.Active)
                         {
+                            // 执行WriteDecision前再次确认非退出状态
+                            if (_closing || token.IsCancellationRequested) break;
                             WriteDecision(decision, now);
                             _heartbeat?.WriteActive(Process.GetCurrentProcess().Id);
                         }
@@ -425,6 +431,7 @@ namespace X15FanControl
         private void StartWriteVerification(int channel, int requestedPercent, int beforeDuty, int beforeRpm)
         {
             int seqId = System.Threading.Interlocked.Increment(ref _ecSequenceId);
+            bool detailedLog = _config.DetailedVerificationLogging;
 
             CancellationTokenSource cts;
             lock (_verificationLock)
@@ -477,7 +484,7 @@ namespace X15FanControl
                     finally { _ecLock.Release(); }
                     double pct50 = duty50 * 100.0 / 255.0;
                     long delay50 = stopwatch.ElapsedMilliseconds;
-                    LogVerification(seqId, channel, "50ms", requestedPercent, duty50, pct50, beforeDuty, delay50, rpmAt50, beforeRpm);
+                    if (detailedLog) LogVerification(seqId, channel, "50ms", requestedPercent, duty50, pct50, beforeDuty, delay50, rpmAt50, beforeRpm);
 
                     // 200ms回读
                     await System.Threading.Tasks.Task.Delay(150, token); // 50+150=200
@@ -492,7 +499,7 @@ namespace X15FanControl
                     finally { _ecLock.Release(); }
                     double pct200 = duty200 * 100.0 / 255.0;
                     long delay200 = stopwatch.ElapsedMilliseconds;
-                    LogVerification(seqId, channel, "200ms", requestedPercent, duty200, pct200, beforeDuty, delay200, rpmAt200, beforeRpm);
+                    if (detailedLog) LogVerification(seqId, channel, "200ms", requestedPercent, duty200, pct200, beforeDuty, delay200, rpmAt200, beforeRpm);
 
                     // 1000ms回读 + RPM响应检查
                     await System.Threading.Tasks.Task.Delay(800, token); // 200+800=1000
@@ -507,7 +514,7 @@ namespace X15FanControl
                     finally { _ecLock.Release(); }
                     double pct1000 = duty1000 * 100.0 / 255.0;
                     long delay1000 = stopwatch.ElapsedMilliseconds;
-                    LogVerification(seqId, channel, "1000ms", requestedPercent, duty1000, pct1000, beforeDuty, delay1000, rpm1000, beforeRpm);
+                    if (detailedLog) LogVerification(seqId, channel, "1000ms", requestedPercent, duty1000, pct1000, beforeDuty, delay1000, rpm1000, beforeRpm);
 
                     // RPM方向检查
                     int beforeDutyPct = beforeDuty * 100 / 255;
@@ -1209,7 +1216,7 @@ namespace X15FanControl
                             catch { }
                         });
 
-                        _engine?.Reset();
+                        lock (_engineLock) { _engine?.Reset(); }
                         SetRunMode(RunMode.ReadOnly, "恢复后安全重置");
                     }
                     catch (Exception ex)
@@ -1230,31 +1237,53 @@ namespace X15FanControl
                 return;
             }
 
-            // 真正退出：完整清理，必须先停止控制循环再恢复Auto
+            // 真正退出：异步执行清理，不在UI线程Wait
+            e.Cancel = true;
+            _ = ExitAsync();
+        }
+
+        private async System.Threading.Tasks.Task ExitAsync()
+        {
+            // 防止重复执行
+            if (_closing) return;
             _closing = true;
             _mainTimer.Stop();
+            _runMode = RunMode.ReadOnly;
 
-            // 第1步：停止后台控制循环
-            AppendLog("正在停止控制循环...");
+            AppendLog("Control loop cancellation requested");
             _controlCts?.Cancel();
-            try { _controlTask?.Wait(2000); } catch { }
-            AppendLog("Control loop stopped");
 
-            // 第2步：使验证任务失效
+            // 停止校准（防止校准中隐藏导致固定占空比）
+            try { StopCalibration("退出"); } catch { }
+
+            // 等待后台控制循环实际结束（最多3秒）
+            bool controlStopped = false;
+            try
+            {
+                if (_controlTask != null)
+                    controlStopped = await System.Threading.Tasks.Task.WhenAny(_controlTask,
+                        System.Threading.Tasks.Task.Delay(3000)) == _controlTask;
+            }
+            catch { }
+
+            if (controlStopped)
+                AppendLog("Control loop stopped");
+            else
+                AppendLog("Control loop stop timeout — proceeding with cleanup");
+
+            // 使验证任务失效
             InvalidateVerificationTasks();
 
-            // 第3步：恢复Auto（此时无后台写入）
+            // 恢复Auto（此时确认无后台写入）
             AppendLog("RestoreAuto begin");
-            try { StopCalibration("应用程序关闭"); } catch { }
             try { RestoreAuto("应用程序关闭"); } catch { }
             AppendLog("RestoreAuto end");
 
-            // 第4步：停止附加服务
+            // 停止附加服务
             try { StopWatchdog(); } catch { }
             try { _heartbeat?.WriteStop(); } catch { }
 
-            // 第5步：停止GPU遥测
-            _logCts?.Cancel();
+            // 停止GPU遥测
             if (_gpuTelemetry != null)
             {
                 _gpuTelemetry.Dispose();
@@ -1263,15 +1292,16 @@ namespace X15FanControl
             _csvLogger?.Dispose();
             _csvLogger = null;
 
-            // 第6步：Flush日志
-            try { _logFlushTask?.Wait(2000); } catch { }
+            // Flush日志
+            _logCts?.Cancel();
+            try { if (_logFlushTask != null) await System.Threading.Tasks.Task.WhenAny(_logFlushTask, System.Threading.Tasks.Task.Delay(2000)); } catch { }
             FlushLogQueue();
 
-            // 第7步：释放EC
+            // 释放EC
             AppendLog("EC disposed");
             DisposeEc();
 
-            // 第8步：释放NotifyIcon
+            // 释放NotifyIcon
             if (_notifyIcon != null)
             {
                 _notifyIcon.Visible = false;
@@ -1279,6 +1309,10 @@ namespace X15FanControl
                 _notifyIcon = null;
             }
             SystemEvents.PowerModeChanged -= SystemEventsPowerModeChanged;
+
+            // 最终退出
+            _explicitExitRequested = true;
+            Application.ExitThread();
         }
 
         private void DisposeEc()

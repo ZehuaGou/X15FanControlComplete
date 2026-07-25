@@ -38,7 +38,14 @@ namespace X15FanCore.Control
                     MergeDefaultProfiles(config, DefaultProfiles.CreateConfig());
 
                     // 规范化新增字段（旧JSON反序列化后可能缺失）
-                    NormalizeConfig(config);
+                    // stream会在using结束时关闭，关闭后才写入
+                    bool normalized = NormalizeConfig(config);
+
+                    // 迁移或规范化后保存一次（此时文件流已关闭）
+                    if (normalized)
+                    {
+                        Save(config);
+                    }
 
                     return config;
                 }
@@ -91,8 +98,11 @@ namespace X15FanCore.Control
         }
 
         // 规范化配置文件：为旧版本config.json中缺失的字段设置安全默认值
-        private static void NormalizeConfig(AppConfig config)
+        // 返回true表示进行了修改，调用方应保存
+        private static bool NormalizeConfig(AppConfig config)
         {
+            bool changed = false;
+
             if (config.ConfigVersion < 2)
             {
                 // 从版本1升级：桌面体验字段可能缺失
@@ -104,7 +114,15 @@ namespace X15FanCore.Control
                 config.ChartSampleIntervalMs = 1000;
                 config.MaxUiLogLines = 1500;
                 config.ConfigVersion = 2;
+                changed = true;
             }
+
+            // 对异常值进行规范化（无论版本）
+            if (config.UiRefreshIntervalMs <= 0) { config.UiRefreshIntervalMs = 500; changed = true; }
+            if (config.ChartSampleIntervalMs <= 0) { config.ChartSampleIntervalMs = 1000; changed = true; }
+            if (config.MaxUiLogLines <= 0) { config.MaxUiLogLines = 1500; changed = true; }
+
+            return changed;
         }
 
         // 将默认配置中有但用户配置中没有的配置追加进去，方便用户升级后使用新配置

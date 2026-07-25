@@ -130,8 +130,7 @@ namespace X15FanControl
             }
 
             _config.ActiveProfileName = selected.Name;
-            _engine?.SetProfile(selected);
-            _engine?.Reset();
+            lock (_engineLock) { _engine?.SetProfile(selected); _engine?.Reset(); }
             LoadProfileIntoEditor(selected);
             SaveConfig();
             AppendLog("已选择配置：" + selected.Name);
@@ -167,7 +166,7 @@ namespace X15FanControl
                 {
                     _config.ActiveProfileName = profile.Name;
                     _configStore.Save(_config);
-                    _engine.SetProfile(profile);
+                    lock (_engineLock) { _engine.SetProfile(profile); }
                     PopulateProfiles();
                     dialog.DialogResult = DialogResult.OK;
                     dialog.Close();
@@ -188,8 +187,7 @@ namespace X15FanControl
                 profile.Cpu.Curve = ValidateAndNormalizeCurve(_cpuCurveBinding, "CPU");
                 profile.Gpu.Curve = ValidateAndNormalizeCurve(_gpuCurveBinding, "GPU");
                 _configStore.Save(_config);
-                _engine.SetProfile(profile);
-                _engine.Reset();
+                lock (_engineLock) { _engine.SetProfile(profile); _engine.Reset(); }
                 LoadProfileIntoEditor(profile);
                 AppendLog("已保存配置：" + profile.Name);
                 MessageBox.Show("配置已保存。", "X15 风扇控制", MessageBoxButtons.OK, MessageBoxIcon.Information);

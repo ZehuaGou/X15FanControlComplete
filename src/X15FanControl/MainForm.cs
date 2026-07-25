@@ -410,6 +410,14 @@ namespace X15FanControl
 
         private void HideToTray()
         {
+            // 校准中不能隐藏到托盘：先停止校准并恢复风扇Auto
+            if (_calibrationActive)
+            {
+                StopCalibration("窗口隐藏");
+                AppendLog("声学校准已停止并恢复自动，校准期间不能隐藏窗口。");
+                // 仍然允许隐藏，但校准已停止
+            }
+
             if (!_trayHintShown)
             {
                 _trayHintShown = true;
@@ -457,9 +465,11 @@ namespace X15FanControl
                     exePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "X15FanControl.exe");
                 if (!File.Exists(exePath)) return false;
 
-                string args = string.Format("/Create /TN \"X15FanControl\" /TR \"\\\"{0}\\\" --autostart --minimized\" /SC ONLOGON /RL HIGHEST /F",
-                    exePath);
-                var psi = new ProcessStartInfo("schtasks.exe", args)
+                // 根据 StartMinimizedToTray 决定是否带 --minimized
+                string minimizedFlag = _config.StartMinimizedToTray ? " --minimized" : "";
+                string taskArgs = string.Format("/Create /TN \"X15FanControl\" /TR \"\\\"{0}\\\" --autostart{1}\" /SC ONLOGON /RL HIGHEST /F",
+                    exePath, minimizedFlag);
+                var psi = new ProcessStartInfo("schtasks.exe", taskArgs)
                 {
                     UseShellExecute = false,
                     CreateNoWindow = true,
