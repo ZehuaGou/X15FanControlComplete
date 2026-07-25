@@ -5,6 +5,7 @@ using System.Linq;
 using System.Windows.Forms;
 using X15FanCore.Control;
 using X15FanCore.Models;
+using X15FanCore.Native;
 
 namespace X15FanControl
 {
@@ -140,16 +141,16 @@ namespace X15FanControl
                 return;
             }
 
-            SetRunMode(RunMode.ReadOnly, "校准启动中");
-            RestoreAuto("校准准备");
             _calibrationRecords.Clear();
             _calibrationRecordsList.Items.Clear();
             _calibrationFan = (FanKind)_calibrationFanCombo.SelectedItem;
             _calibrationCurrentDuty = start;
             _calibrationStepStartedUtc = DateTime.UtcNow;
+            _calibrationPresetPath = null;
+            _calibrationPresetIndex = 0;
+
+            // 先发布完整校准状态，阻止后台控制循环在准备阶段生成或写入控制决策。
             _calibrationActive = true;
-            _heartbeat.WriteActive(System.Diagnostics.Process.GetCurrentProcess().Id);
-            StartWatchdog();
             _calibrationStartButton.Enabled = false;
             _calibrationStopButton.Enabled = true;
             _calibrationMarkNoisyButton.Enabled = true;
@@ -157,8 +158,24 @@ namespace X15FanControl
 
             int channel = _calibrationFan == FanKind.Cpu ? 1 : 2;
             int otherChannel = channel == 1 ? 2 : 1;
-            _ec.SetFanAuto(otherChannel);
-            _ec.SetFanPercent(channel, _calibrationCurrentDuty);
+            try
+            {
+                _heartbeat.WriteActive(System.Diagnostics.Process.GetCurrentProcess().Id);
+                StartWatchdog();
+                SetRunMode(RunMode.ReadOnly, "校准启动中");
+                EcRestoreAllAuto();
+                EcSetFanAuto(otherChannel);
+                EcSetFanPercent(channel, _calibrationCurrentDuty);
+            }
+            catch (Exception ex)
+            {
+                AppendLog("校准启动EC操作失败：" + ex.Message);
+                StopCalibration("校准启动失败");
+                MessageBox.Show("校准启动失败，已尝试恢复两个风扇为自动：" + ex.Message,
+                    "声学校准", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
             AppendLog("已开始对 " + _calibrationFan + " 进行校准，当前占空比 " + _calibrationCurrentDuty + "%。");
             UpdateCalibrationStatus();
         }
@@ -184,7 +201,10 @@ namespace X15FanControl
             if ((DateTime.UtcNow - _calibrationStepStartedUtc).TotalSeconds >= holdSeconds)
             {
                 // 记录当前档位（使用档位后半段的稳定值）
-                RecordCalibrationPoint(false, false);
+                if (!RecordCalibrationPoint(false, false))
+                {
+                    return;
+                }
 
                 if (_calibrationPresetPath != null)
                 {
@@ -211,24 +231,39 @@ namespace X15FanControl
 
                 _calibrationStepStartedUtc = DateTime.UtcNow;
                 int channel = _calibrationFan == FanKind.Cpu ? 1 : 2;
-                _ec.SetFanPercent(channel, _calibrationCurrentDuty);
+                try
+                {
+                    EcSetFanPercent(channel, _calibrationCurrentDuty);
+                }
+                catch (Exception ex)
+                {
+                    AppendLog("校准步进EC写入失败：" + ex.Message);
+                    StopCalibration("校准EC写入失败");
+                    return;
+                }
                 AppendLog("校准步进：" + _calibrationFan + " " + _calibrationCurrentDuty + "%。");
             }
 
-            _heartbeat.WriteActive(System.Diagnostics.Process.GetCurrentProcess().Id);
+            try
+            {
+                _heartbeat.WriteActive(System.Diagnostics.Process.GetCurrentProcess().Id);
+            }
+            catch (Exception ex)
+            {
+                AppendLog("校准心跳写入失败：" + ex.Message);
+                StopCalibration("校准心跳异常");
+                return;
+            }
             UpdateCalibrationStatus();
         }
 
         private void FinishPresetCalibration()
         {
-            _calibrationActive = false;
-            try { _ec?.RestoreAllAuto(); } catch { }
-            StopWatchdog();
-            _heartbeat.WriteStop();
-            _calibrationStartButton.Enabled = true;
-            _calibrationStopButton.Enabled = false;
-            _calibrationMarkNoisyButton.Enabled = false;
-            _calibrationMarkStableButton.Enabled = false;
+            if (!StopCalibration("预设标定完成"))
+            {
+                AppendLog("预设标定完成，但恢复自动失败；保留校准保护状态。");
+                return;
+            }
 
             // 生成标定CSV和阶跃分析
             string csvPath = GenerateCalibrationReport();
@@ -294,12 +329,15 @@ namespace X15FanControl
 
         private void MarkCalibrationPoint(bool noisy)
         {
-            if (!_calibrationActive || _lastSnapshot == null)
+            if (!_calibrationActive || GetLatestSnapshotForCalibration() == null)
             {
                 return;
             }
 
-            RecordCalibrationPoint(noisy, !noisy);
+            if (!RecordCalibrationPoint(noisy, !noisy))
+            {
+                return;
+            }
             if (noisy)
             {
                 List<int> list = _calibrationFan == FanKind.Cpu ? _config.CalibrationNoisyPointsCpu : _config.CalibrationNoisyPointsGpu;
@@ -309,26 +347,54 @@ namespace X15FanControl
             }
         }
 
-        private void RecordCalibrationPoint(bool noisy, bool stable)
+        private bool RecordCalibrationPoint(bool noisy, bool stable)
         {
-            if (_lastSnapshot == null)
+            FanSnapshot snapshot = GetLatestSnapshotForCalibration();
+            if (snapshot == null)
             {
-                return;
+                return false;
+            }
+
+            FanKind fan = _calibrationFan;
+            int duty = _calibrationCurrentDuty;
+            int channel = fan == FanKind.Cpu ? 1 : 2;
+            EcData raw;
+            int rpm;
+            try
+            {
+                // 校准点使用即时EC回读；包装器与后台ReadSnapshot共用_ecLock。
+                raw = EcReadRaw(channel);
+                rpm = fan == FanKind.Cpu ? EcGetCpuRpmLocked() : EcGetGpuRpmLocked();
+            }
+            catch (Exception ex)
+            {
+                AppendLog("记录校准点时EC回读失败：" + ex.Message);
+                StopCalibration("校准EC回读失败");
+                return false;
             }
 
             CalibrationRecord record = new CalibrationRecord
             {
                 TimestampUtc = DateTime.UtcNow,
-                Fan = _calibrationFan,
-                DutyPercent = _calibrationCurrentDuty,
-                TemperatureC = _calibrationFan == FanKind.Cpu ? _lastSnapshot.CpuTemperatureC : _lastSnapshot.GpuTemperatureC,
-                Rpm = _calibrationFan == FanKind.Cpu ? _lastSnapshot.CpuRpm : _lastSnapshot.GpuRpm,
+                Fan = fan,
+                DutyPercent = duty,
+                TemperatureC = fan == FanKind.Cpu ? raw.Remote : snapshot.GpuTemperatureC,
+                Rpm = rpm,
                 MarkedNoisy = noisy,
                 MarkedStable = stable
             };
             _calibrationRecords.Add(record);
             _calibrationRecordsList.Items.Add(record);
             _calibrationRecordsList.TopIndex = _calibrationRecordsList.Items.Count - 1;
+            return true;
+        }
+
+        private FanSnapshot GetLatestSnapshotForCalibration()
+        {
+            lock (_latestLock)
+            {
+                return _lastSnapshot;
+            }
         }
 
         private void CalibrationGenerateZoneButtonClick(object sender, EventArgs e)
@@ -351,35 +417,46 @@ namespace X15FanControl
             channel.StableZoneMaximumPercent = maximum;
             channel.StableZoneHoldPercent = hold;
             SaveConfig();
-            _engine.SetProfile(profile);
+            lock (_engineLock) { _engine.SetProfile(profile); }
             LoadProfileIntoEditor(profile);
             MessageBox.Show("稳定区间已设置为 " + minimum + "–" + maximum + "%，保持点为 " + hold + "%。", "校准", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
-        private void StopCalibration(string reason)
+        private bool StopCalibration(string reason)
         {
             if (!_calibrationActive)
             {
-                return;
+                return true;
+            }
+
+            FanKind fan = _calibrationFan;
+            int channel = fan == FanKind.Cpu ? 1 : 2;
+            try
+            {
+                // 先恢复正在校准的通道，再恢复全部通道。两步都成功后才发布停止状态。
+                EcRestoreCalibrationAuto(channel);
+            }
+            catch (Exception ex)
+            {
+                AppendLog("校准停止时恢复自动失败：" + ex.Message);
+                _calibrationStatusLabel.Text = reason + "，但恢复自动失败；窗口保护仍然有效。";
+                return false;
             }
 
             _calibrationActive = false;
-            try
-            {
-                _ec?.RestoreAllAuto();
-            }
-            catch
-            {
-            }
-
-            StopWatchdog();
-            _heartbeat.WriteStop();
+            try { StopWatchdog(); }
+            catch (Exception ex) { AppendLog("停止校准看门狗失败：" + ex.Message); }
+            try { _heartbeat?.WriteStop(); }
+            catch (Exception ex) { AppendLog("停止校准心跳失败：" + ex.Message); }
             _calibrationStartButton.Enabled = true;
             _calibrationStopButton.Enabled = false;
             _calibrationMarkNoisyButton.Enabled = false;
             _calibrationMarkStableButton.Enabled = false;
             _calibrationStatusLabel.Text = reason + "。两个风扇已恢复自动。";
             AppendLog("校准已停止：" + reason + "。");
+            _calibrationPresetPath = null;
+            _calibrationPresetIndex = 0;
+            return true;
         }
 
         private void UpdateCalibrationStatus()
@@ -447,32 +524,43 @@ namespace X15FanControl
                 return;
             }
 
-            SetRunMode(RunMode.ReadOnly, "校准启动中");
-            RestoreAuto("校准准备");
-
             _calibrationRecords.Clear();
             _calibrationRecordsList.Items.Clear();
             _calibrationFan = (FanKind)_calibrationFanCombo.SelectedItem;
+            int channel = _calibrationFan == FanKind.Cpu ? 1 : 2;
+            int otherChannel = channel == 1 ? 2 : 1;
+            _calibrationCurrentDuty = presetPoints[0];
+            _calibrationStepStartedUtc = DateTime.UtcNow;
+
+            // 先发布完整预设状态，再让后台控制循环观察到校准已激活。
+            _calibrationPresetPath = presetPoints;
+            _calibrationPresetIndex = 0;
             _calibrationActive = true;
-            _heartbeat.WriteActive(System.Diagnostics.Process.GetCurrentProcess().Id);
-            StartWatchdog();
             _calibrationStartButton.Enabled = false;
             _calibrationStopButton.Enabled = true;
             _calibrationMarkNoisyButton.Enabled = true;
             _calibrationMarkStableButton.Enabled = true;
 
-            int channel = _calibrationFan == FanKind.Cpu ? 1 : 2;
-            int otherChannel = channel == 1 ? 2 : 1;
-            _ec.SetFanAuto(otherChannel);
-            _calibrationCurrentDuty = presetPoints[0];
-            _ec.SetFanPercent(channel, _calibrationCurrentDuty);
-            _calibrationStepStartedUtc = DateTime.UtcNow;
+            try
+            {
+                _heartbeat.WriteActive(System.Diagnostics.Process.GetCurrentProcess().Id);
+                StartWatchdog();
+                SetRunMode(RunMode.ReadOnly, "校准启动中");
+                EcRestoreAllAuto();
+                EcSetFanAuto(otherChannel);
+                EcSetFanPercent(channel, _calibrationCurrentDuty);
+            }
+            catch (Exception ex)
+            {
+                AppendLog("预设校准启动EC操作失败：" + ex.Message);
+                StopCalibration("预设校准启动失败");
+                MessageBox.Show("预设校准启动失败，已尝试恢复两个风扇为自动：" + ex.Message,
+                    "声学校准", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                return;
+            }
+
             AppendLog("预设标定开始：" + _calibrationFan + "，起始占空比 " + _calibrationCurrentDuty + "%。");
             UpdateCalibrationStatus();
-
-            // 保存预设路径用于校准tick
-            _calibrationPresetPath = presetPoints;
-            _calibrationPresetIndex = 0;
         }
 
         // 预设标定跟踪

@@ -10,6 +10,8 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "X15FanWatchdog", "src\X15Fa
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "X15GpuTelemetry", "src\X15GpuTelemetry\X15GpuTelemetry.csproj", "{D5C8B37A-4D35-4DA2-80EF-B977FCE93629}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "X15FanCore.Tests", "tests\X15FanCore.Tests\X15FanCore.Tests.csproj", "{71B9E603-4ED0-4BB1-AF31-0303947994D1}"
+EndProject
 Global
     GlobalSection(SolutionConfigurationPlatforms) = preSolution
         Debug|x86 = Debug|x86
@@ -32,6 +34,10 @@ Global
         {D5C8B37A-4D35-4DA2-80EF-B977FCE93629}.Debug|x86.Build.0 = Debug|x64
         {D5C8B37A-4D35-4DA2-80EF-B977FCE93629}.Release|x86.ActiveCfg = Release|x64
         {D5C8B37A-4D35-4DA2-80EF-B977FCE93629}.Release|x86.Build.0 = Release|x64
+        {71B9E603-4ED0-4BB1-AF31-0303947994D1}.Debug|x86.ActiveCfg = Debug|x86
+        {71B9E603-4ED0-4BB1-AF31-0303947994D1}.Debug|x86.Build.0 = Debug|x86
+        {71B9E603-4ED0-4BB1-AF31-0303947994D1}.Release|x86.ActiveCfg = Release|x86
+        {71B9E603-4ED0-4BB1-AF31-0303947994D1}.Release|x86.Build.0 = Release|x86
     EndGlobalSection
     GlobalSection(SolutionProperties) = preSolution
         HideSolutionNode = FALSE

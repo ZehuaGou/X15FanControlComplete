@@ -1,4 +1,5 @@
 using System;
+using System.Diagnostics;
 using System.IO;
 using System.Runtime.Serialization.Json;
 using X15FanCore.Models;
@@ -13,9 +14,12 @@ namespace X15FanCore.Control
         }
 
         public string ConfigPath { get; private set; }
+        public string LastLoadDiagnostic { get; private set; }
 
         public AppConfig LoadOrCreate()
         {
+            LastLoadDiagnostic = null;
+
             if (!File.Exists(ConfigPath))
             {
                 AppConfig defaults = DefaultProfiles.CreateConfig();
@@ -23,35 +27,23 @@ namespace X15FanCore.Control
                 return defaults;
             }
 
+            AppConfig config;
             try
             {
                 using (FileStream stream = File.OpenRead(ConfigPath))
                 {
                     DataContractJsonSerializer serializer = new DataContractJsonSerializer(typeof(AppConfig));
-                    AppConfig config = serializer.ReadObject(stream) as AppConfig;
+                    config = serializer.ReadObject(stream) as AppConfig;
                     if (config == null || config.Profiles == null || config.Profiles.Count == 0)
                     {
                         throw new InvalidDataException("Configuration contains no profiles.");
                     }
-
-                    // 合并默认配置中缺失的配置（用户升级后自动获得新配置）
-                    MergeDefaultProfiles(config, DefaultProfiles.CreateConfig());
-
-                    // 规范化新增字段（旧JSON反序列化后可能缺失）
-                    // stream会在using结束时关闭，关闭后才写入
-                    bool normalized = NormalizeConfig(config);
-
-                    // 迁移或规范化后保存一次（此时文件流已关闭）
-                    if (normalized)
-                    {
-                        Save(config);
-                    }
-
-                    return config;
                 }
             }
-            catch
+            catch (Exception ex)
             {
+                LastLoadDiagnostic = "配置读取/解析失败：" + ex.Message;
+                Trace.TraceError(LastLoadDiagnostic);
                 string backup = ConfigPath + ".invalid-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".bak";
                 try
                 {
@@ -64,6 +56,25 @@ namespace X15FanCore.Control
                 Save(defaults);
                 return defaults;
             }
+
+            bool changed = MergeDefaultProfiles(config, DefaultProfiles.CreateConfig());
+            changed |= NormalizeConfig(config);
+            if (changed)
+            {
+                try
+                {
+                    Save(config);
+                }
+                catch (Exception ex)
+                {
+                    // 配置已经成功读取。迁移写回失败不能触发“损坏配置”恢复，
+                    // 否则会用默认配置覆盖用户的 Profile 和曲线。
+                    LastLoadDiagnostic = "配置迁移保存失败；继续使用已读取的内存配置，原文件保持不变：" + ex.Message;
+                    Trace.TraceError(LastLoadDiagnostic);
+                }
+            }
+
+            return config;
         }
 
         public void Save(AppConfig config)
@@ -126,11 +137,12 @@ namespace X15FanCore.Control
         }
 
         // 将默认配置中有但用户配置中没有的配置追加进去，方便用户升级后使用新配置
-        private static void MergeDefaultProfiles(AppConfig userConfig, AppConfig defaultConfig)
+        private static bool MergeDefaultProfiles(AppConfig userConfig, AppConfig defaultConfig)
         {
             if (defaultConfig?.Profiles == null)
-                return;
+                return false;
 
+            bool changed = false;
             foreach (FanProfile defaultProfile in defaultConfig.Profiles)
             {
                 bool exists = false;
@@ -146,8 +158,11 @@ namespace X15FanCore.Control
                 if (!exists)
                 {
                     userConfig.Profiles.Add(defaultProfile);
+                    changed = true;
                 }
             }
+
+            return changed;
         }
     }
 }

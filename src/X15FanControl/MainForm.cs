@@ -52,6 +52,7 @@ namespace X15FanControl
         private NotifyIcon _notifyIcon;
         private DateTime _lastTickUtc;
         private bool _closing;
+        private bool _allowFinalClose;
 
         // Window behavior
         private bool _explicitExitRequested;
@@ -132,9 +133,9 @@ namespace X15FanControl
         private Button _calibrationGenerateZoneButton;
         private Label _calibrationStatusLabel;
         private ListBox _calibrationRecordsList;
-        private bool _calibrationActive;
-        private FanKind _calibrationFan;
-        private int _calibrationCurrentDuty;
+        private volatile bool _calibrationActive;
+        private volatile FanKind _calibrationFan;
+        private volatile int _calibrationCurrentDuty;
         private DateTime _calibrationStepStartedUtc;
         private readonly List<CalibrationRecord> _calibrationRecords = new List<CalibrationRecord>();
         private FanSnapshot _lastSnapshot;
@@ -177,6 +178,10 @@ namespace X15FanControl
             // 配置加载（快速，无阻塞）
             _configStore = new ConfigStore(_configPath);
             _config = _configStore.LoadOrCreate();
+            if (!string.IsNullOrEmpty(_configStore.LastLoadDiagnostic))
+            {
+                AppendLog(_configStore.LastLoadDiagnostic);
+            }
             _heartbeat = new Heartbeat(_heartbeatPath);
 
             PopulateModeCombo();
@@ -413,9 +418,17 @@ namespace X15FanControl
             // 校准中不能隐藏到托盘：先停止校准并恢复风扇Auto
             if (_calibrationActive)
             {
-                StopCalibration("窗口隐藏");
-                AppendLog("声学校准已停止并恢复自动，校准期间不能隐藏窗口。");
-                // 仍然允许隐藏，但校准已停止
+                if (!StopCalibration("窗口隐藏"))
+                {
+                    MessageBox.Show(
+                        "恢复自动失败，窗口不会隐藏。请使用“恢复自动”并检查 EC 日志。",
+                        "声学校准",
+                        MessageBoxButtons.OK,
+                        MessageBoxIcon.Error);
+                    return;
+                }
+
+                NotifyCalibrationWindowActionStopped();
             }
 
             if (!_trayHintShown)
@@ -427,6 +440,13 @@ namespace X15FanControl
             }
             ShowInTaskbar = false;
             Hide();
+        }
+
+        private void NotifyCalibrationWindowActionStopped()
+        {
+            const string message = "声学校准已停止并恢复自动，校准期间不能隐藏或最小化窗口。";
+            AppendLog(message);
+            MessageBox.Show(message, "声学校准", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         private void ExitApplication()
