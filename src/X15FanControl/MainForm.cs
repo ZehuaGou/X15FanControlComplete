@@ -72,11 +72,12 @@ namespace X15FanControl
         // Chart downsampling
         private DateTime _lastChartSampleUtc = DateTime.MinValue;
 
-        // Dashboard animation is presentation-only. It never feeds values back to the controller.
-        private const int DashboardAnimationDurationMs = 280;
+        // Dashboard transition is presentation-only. Values switch atomically at the fade midpoint.
+        private const int DashboardTransitionDurationMs = 180;
         private bool _dashboardAnimationInitialized;
         private DateTime _dashboardAnimationStartedUtc;
-        private DashboardDisplayValues _dashboardAnimationFrom;
+        private bool _dashboardAnimationTextSwitched;
+        private int _dashboardAnimationChangedMask;
         private DashboardDisplayValues _dashboardAnimationCurrent;
         private DashboardDisplayValues _dashboardAnimationTarget;
         private bool _displayCpuTemperature;
@@ -84,6 +85,11 @@ namespace X15FanControl
         private bool _displayCpuRpm;
         private bool _displayGpuRpm;
         private bool _displayDecisionValues;
+        private bool _targetDisplayCpuTemperature;
+        private bool _targetDisplayGpuTemperature;
+        private bool _targetDisplayCpuRpm;
+        private bool _targetDisplayGpuRpm;
+        private bool _targetDisplayDecisionValues;
 
         // Thread safety
         private readonly object _engineLock = new object();
@@ -432,10 +438,9 @@ namespace X15FanControl
             ShowInTaskbar = true;
             Show();
             WindowState = FormWindowState.Normal;
-            if (_dashboardAnimationInitialized &&
-                !DashboardDisplayValuesEqual(_dashboardAnimationCurrent, _dashboardAnimationTarget))
+            if (_dashboardAnimationInitialized && DashboardTransitionPending())
             {
-                _dashboardAnimationTimer.Start();
+                CompleteDashboardTransition();
             }
             Invalidate(true);
             Activate();
