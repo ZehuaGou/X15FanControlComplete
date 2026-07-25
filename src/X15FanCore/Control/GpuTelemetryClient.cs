@@ -242,6 +242,7 @@ namespace X15FanCore.Control
                     Arguments = "--interval-ms " + _pollIntervalMs + " --parent-pid " + Process.GetCurrentProcess().Id,
                     UseShellExecute = false,
                     CreateNoWindow = true,
+                    RedirectStandardInput = true,
                     RedirectStandardOutput = true,
                     RedirectStandardError = true,
                     StandardOutputEncoding = Encoding.UTF8,

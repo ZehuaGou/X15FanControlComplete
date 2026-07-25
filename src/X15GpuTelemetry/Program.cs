@@ -184,13 +184,25 @@ namespace X15GpuTelemetry
                             else
                             {
                                 int err = Marshal.GetLastWin32Error();
-                                WriteError("AssignProcessToJobObject failed: " + new Win32Exception(err).Message);
+                                WriteError("AssignProcessToJobObject failed: " + new Win32Exception(err).Message
+                                    + " — terminating nvidia-smi PID=" + smiProcess.Id);
+                                try { smiProcess.Kill(); smiProcess.WaitForExit(2000); } catch { }
+                                smiProcess.Dispose();
+                                smiProcess = null;
+                                exitCode = 1;
+                                return 1;
                             }
                         }
                     }
                     catch (Exception ex)
                     {
-                        WriteError("AssignProcessToJobObject exception: " + ex.Message);
+                        WriteError("AssignProcessToJobObject exception: " + ex.Message
+                            + " — terminating nvidia-smi PID=" + smiProcess.Id);
+                        try { smiProcess.Kill(); smiProcess.WaitForExit(2000); } catch { }
+                        smiProcess.Dispose();
+                        smiProcess = null;
+                        exitCode = 1;
+                        return 1;
                     }
                 }
 
@@ -231,7 +243,28 @@ namespace X15GpuTelemetry
                 smiProcess.BeginOutputReadLine();
                 smiProcess.BeginErrorReadLine();
 
-                // --- File and parent monitoring loop ---
+                // --- Stdin monitor thread: parent disposes stdin to signal exit ---
+                var stdinThread = new Thread(() =>
+                {
+                    try
+                    {
+                        // ReadLine returns null when stdin pipe is closed by parent
+                        string stdinLine = Console.In.ReadLine();
+                        if (stdinLine == null)
+                        {
+                            WriteTelemetry("info", new { message = "Parent closed stdin, initiating shutdown" });
+                        }
+                    }
+                    catch { }
+                    finally
+                    {
+                        try { cts.Cancel(); } catch { }
+                    }
+                })
+                { IsBackground = true, Name = "StdinMonitor" };
+                stdinThread.Start();
+
+                // --- Parent PID monitoring loop ---
                 CancellationToken token = cts.Token;
                 while (!token.IsCancellationRequested)
                 {
@@ -283,6 +316,7 @@ namespace X15GpuTelemetry
             finally
             {
                 // Stop async reading
+                bool nvidiaSmiExited = smiProcess == null || smiProcess.HasExited;
                 try
                 {
                     if (smiProcess != null)
@@ -301,7 +335,9 @@ namespace X15GpuTelemetry
                 if (jobHandle != IntPtr.Zero)
                 {
                     JobObjectCleanup(jobHandle);
-                    WriteTelemetry("info", new { message = "Job Object closed", nvidiaSmiExited = smiProcess?.HasExited ?? true });
+                    // Use pre-dispose snapshot; do NOT touch smiProcess after Dispose
+                    try { WriteTelemetry("info", new { message = "Job Object closed", nvidiaSmiExited }); }
+                    catch { }
                 }
             }
 
