@@ -69,7 +69,12 @@ namespace X15FanControl
 
                 // 7. CPU 12点校准
                 string csvPath = Path.Combine(_verifyDir, $"cal-cpu-{timestamp}.csv");
-                RunCpuCalibration(csvPath);
+                if (!RunCpuCalibration(csvPath))
+                {
+                    Log("CPU校准失败或未完成，终止");
+                    RestoreAllAuto("CPU校准失败");
+                    return 1;
+                }
 
                 // 8. 恢复Auto
                 RestoreAllAuto("验证完成");
@@ -333,7 +338,7 @@ namespace X15FanControl
             return true;
         }
 
-        private void RunCpuCalibration(string csvPath)
+        private bool RunCpuCalibration(string csvPath)
         {
             Log("\n===== CPU 12点校准开始 =====");
             int[] points = { 45, 47, 48, 49, 50, 51, 52, 54, 56, 58, 60, 65 };
@@ -487,7 +492,19 @@ namespace X15FanControl
             }
 
             Log($"校准CSV保存至: {csvPath}");
-            Log($"共完成 {calibrationRecords.Count} 个档位");
+
+            if (abortRequested || calibrationRecords.Count != points.Length)
+            {
+                Log($"校准未完成：共完成 {calibrationRecords.Count}/{points.Length} 个档位（中止或档位不完整）");
+                if (cpuManualControlStarted)
+                {
+                    try { EcSetFanAuto(1); } catch { }
+                }
+                return false;
+            }
+
+            Log($"校准完成：共完成 {calibrationRecords.Count} 个档位");
+            return true;
         }
 
         private string AnalyzeRpmSteps(string csvPath)
@@ -933,6 +950,7 @@ namespace X15FanControl
 
             bool ecInitialized = false;
             bool gpuManualControlStarted = false;
+            int exitCode = 0;
 
             try
             {
@@ -1076,12 +1094,20 @@ namespace X15FanControl
                 // 恢复Auto
                 if (gpuManualControlStarted)
                 {
-                    EcSetFanAuto(2);
-                    Thread.Sleep(500);
-                    Log("GPU风扇已恢复Auto");
+                    try
+                    {
+                        EcSetFanAuto(2);
+                        Thread.Sleep(500);
+                        Log("GPU风扇已恢复Auto");
+                    }
+                    catch (Exception autoEx)
+                    {
+                        Log($"恢复GPU Auto失败: {autoEx.Message}");
+                        exitCode = 5;
+                    }
                 }
 
-                // 写CSV
+                // 写CSV（即使未完成也保存已采集的数据）
                 string csvPath = Path.Combine(_verifyDir, $"gpu-calibration-{timestamp}.csv");
                 using (var writer = new StreamWriter(csvPath, false, System.Text.Encoding.UTF8))
                 {
@@ -1093,26 +1119,41 @@ namespace X15FanControl
                 }
 
                 Log($"校准CSV保存至: {csvPath}");
-                Log($"共完成 {records.Count} 个档位\n");
 
-                // GPU RPM阶跃分析
-                Log("===== GPU RPM阶跃分析（基于中位数） =====");
-                for (int i = 1; i < records.Count; i++)
+                // 判断校准结果
+                if (abortRequested)
                 {
-                    int dutyDelta = records[i].TargetPct - records[i - 1].TargetPct;
-                    double rpmDelta = records[i].MedianRpm - records[i - 1].MedianRpm;
-                    double rpmPerOnePercent = dutyDelta > 0 ? rpmDelta / dutyDelta : 0;
-                    bool isJump = (dutyDelta == 1 && Math.Abs(rpmDelta) > 100) || (dutyDelta > 1 && Math.Abs(rpmPerOnePercent) > 100);
-                    Log($"  {records[i - 1].TargetPct}%→{records[i].TargetPct}%: 占空比+{dutyDelta}%, RPM {rpmDelta:+0;-0}, 占空比变化1%时RPM变化{rpmPerOnePercent:+0;-0}, {(isJump ? "⚠ 阶跃" : "平滑")}");
+                    Log($"校准未完成：共完成 {records.Count}/{points.Length} 个档位（用户取消或温度超标）");
+                    if (exitCode == 0) exitCode = 3;
+                }
+                else if (records.Count != points.Length)
+                {
+                    Log($"校准未完成：共完成 {records.Count}/{points.Length} 个档位（档位不完整）");
+                    if (exitCode == 0) exitCode = 4;
+                }
+                else
+                {
+                    Log($"校准完成：共完成 {records.Count} 个档位\n");
+
+                    // GPU RPM阶跃分析
+                    Log("===== GPU RPM阶跃分析（基于中位数） =====");
+                    for (int i = 1; i < records.Count; i++)
+                    {
+                        int dutyDelta = records[i].TargetPct - records[i - 1].TargetPct;
+                        double rpmDelta = records[i].MedianRpm - records[i - 1].MedianRpm;
+                        double rpmPerOnePercent = dutyDelta > 0 ? rpmDelta / dutyDelta : 0;
+                        bool isJump = (dutyDelta == 1 && Math.Abs(rpmDelta) > 100) || (dutyDelta > 1 && Math.Abs(rpmPerOnePercent) > 100);
+                        Log($"  {records[i - 1].TargetPct}%→{records[i].TargetPct}%: 占空比+{dutyDelta}%, RPM {rpmDelta:+0;-0}, 占空比变化1%时RPM变化{rpmPerOnePercent:+0;-0}, {(isJump ? "⚠ 阶跃" : "平滑")}");
+                    }
+
+                    Log("\n===== 有效数据汇总 =====");
+                    foreach (var rec in records)
+                    {
+                        Log($"  {rec.TargetPct}%: 中位数RPM={rec.MedianRpm:F0}, EC回读={rec.EcReadbackPct:F1}%, 异常{rec.OutlierCount}次, 有效{rec.ValidSamples}/{rec.TotalSamples}");
+                    }
                 }
 
-                Log("\n===== 有效数据汇总 =====");
-                foreach (var rec in records)
-                {
-                    Log($"  {rec.TargetPct}%: 中位数RPM={rec.MedianRpm:F0}, EC回读={rec.EcReadbackPct:F1}%, 异常{rec.OutlierCount}次, 有效{rec.ValidSamples}/{rec.TotalSamples}");
-                }
-
-                return 0;
+                return exitCode;
             }
             catch (Exception ex)
             {
