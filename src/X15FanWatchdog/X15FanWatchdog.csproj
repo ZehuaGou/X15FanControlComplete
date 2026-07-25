@@ -12,7 +12,7 @@
     <Reference Include="System.Core" />
   </ItemGroup>
   <ItemGroup>
-    <None Include="..\..\vendor\ClevoEcInfo.dll" Link="ClevoEcInfo.dll">
+    <None Include="..\..\vendor\ClevoEcInfo.dll" Link="ClevoEcInfo.dll" Condition="Exists('..\..\vendor\ClevoEcInfo.dll')">
       <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
     </None>
   </ItemGroup>

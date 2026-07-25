@@ -401,22 +401,19 @@ namespace X15FanCore.Control
             if (_disposed) throw new ObjectDisposedException("GpuTelemetryClient");
         }
 
-        // 检测并清理泄漏的nvidia-smi进程（静态方法，供外部调用）
-        public static int DetectLeakedProcesses()
+        // 统计当前nvidia-smi进程数（静态方法，仅报告，不结束进程）
+        // 注意：不得按进程名杀掉 nvidia-smi，可能误杀其他软件或用户自己的工具
+        public static int CountNvidiaSmiProcesses()
         {
-            int leakCount = 0;
+            int count = 0;
             try
             {
                 var nvidiaProcs = Process.GetProcessesByName("nvidia-smi");
-                if (nvidiaProcs.Length > 1)
-                {
-                    leakCount = nvidiaProcs.Length - 1;
-                    System.Diagnostics.Trace.WriteLine($"[GpuTelemetry] 检测到 {leakCount} 个泄漏的nvidia-smi进程");
-                }
+                count = nvidiaProcs.Length;
                 foreach (var p in nvidiaProcs) p.Dispose();
             }
             catch { }
-            return leakCount;
+            return count;
         }
     }
 }

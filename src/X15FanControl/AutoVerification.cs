@@ -344,29 +344,55 @@ namespace X15FanControl
             EcSetFanAuto(2);
             Thread.Sleep(500);
 
+            bool cpuManualControlStarted = false;
+            bool abortRequested = false;
             var calibrationRecords = new List<CalibrationRecordData>();
 
             foreach (int target in points)
             {
+                if (abortRequested) break;
+
                 Log($"\n--- 校准 {target}% ---");
                 var tempBefore = EcReadRaw(1);
+
+                _lastGpuTelemetry = _gpuTelemetry?.Latest;
+                bool gpuTelemetryOk = _lastGpuTelemetry != null && _lastGpuTelemetry.IsAvailable && !_lastGpuTelemetry.IsStale;
 
                 // 安全检查
                 if (tempBefore.Remote >= 75)
                 {
                     Log($"  ⛔ CPU温度={tempBefore.Remote}°C ≥ 75°C，中止");
-                    break;
+                    abortRequested = true; break;
                 }
-                if (_gpuTelemetryReady && _lastGpuTelemetry != null && _lastGpuTelemetry.TemperatureC >= 75)
+                if (gpuTelemetryOk && _lastGpuTelemetry.TemperatureC >= 75)
                 {
                     Log($"  ⛔ GPU温度={_lastGpuTelemetry.TemperatureC}°C ≥ 75°C，中止");
-                    break;
+                    abortRequested = true; break;
                 }
 
                 EcSetFanPercent(1, target);
+                cpuManualControlStarted = true;
 
-                // 等待过渡期结束
-                Thread.Sleep(settleMs);
+                // 安全检查辅助函数
+                bool CheckAbort()
+                {
+                    if (!_running) { Log("  用户取消"); return false; }
+                    var cpuNow = EcReadRaw(1);
+                    if (cpuNow.Remote >= 75) { Log($"  ⛔ 采样中CPU温度={cpuNow.Remote}°C ≥ 75°C，中止"); return false; }
+                    _lastGpuTelemetry = _gpuTelemetry?.Latest;
+                    bool gpuOk = _lastGpuTelemetry != null && _lastGpuTelemetry.IsAvailable && !_lastGpuTelemetry.IsStale;
+                    if (!gpuOk) { Log("  ⛔ 采样中GPU遥测失效，中止"); return false; }
+                    if (_lastGpuTelemetry.TemperatureC >= 75) { Log($"  ⛔ 采样中GPU温度={_lastGpuTelemetry.TemperatureC}°C ≥ 75°C，中止"); return false; }
+                    return true;
+                }
+
+                // 等待过渡期（每500ms检查一次）
+                for (int i = 0; i < settleMs / 500; i++)
+                {
+                    Thread.Sleep(500);
+                    if (!CheckAbort()) { abortRequested = true; break; }
+                }
+                if (abortRequested) break;
 
                 // 采集稳定期数据
                 var rpmSamples = new List<int>();
@@ -378,6 +404,7 @@ namespace X15FanControl
 
                 for (int t = 0; t < stablePeriodMs / sampleInterval; t++)
                 {
+                    if (!CheckAbort()) { abortRequested = true; break; }
                     var raw = EcReadRaw(1);
                     int rpm = EcGetCpuRpm();
                     rpmSamples.Add(rpm);
@@ -385,6 +412,7 @@ namespace X15FanControl
                     tempSamples.Add(raw.Remote);
                     Thread.Sleep(sampleInterval);
                 }
+                if (abortRequested) break;
 
                 // 计算统计数据（包含MAD异常值过滤）
                 int rawSampleCount = rpmSamples.Count;
@@ -442,8 +470,11 @@ namespace X15FanControl
             }
 
             // 恢复Auto
-            EcSetFanAuto(1);
-            Thread.Sleep(1000);
+            if (cpuManualControlStarted)
+            {
+                EcSetFanAuto(1);
+                Thread.Sleep(1000);
+            }
 
             // 写CSV
             using (var writer = new StreamWriter(csvPath, false, System.Text.Encoding.UTF8))
@@ -638,6 +669,7 @@ namespace X15FanControl
                 for (int i = 0; i < total; i++)
                 {
                     _lastGpuTelemetry = _gpuTelemetry?.Latest;
+                    _gpuTelemetryReady = _lastGpuTelemetry != null && _lastGpuTelemetry.IsAvailable && !_lastGpuTelemetry.IsStale;
                     var cpu = EcReadRaw(1); var gpu = EcReadRaw(2);
                     _csvWriter.WriteLine($"{(i*0.5):F1},{cpu.Remote},{(_gpuTelemetryReady ? _lastGpuTelemetry.TemperatureC.ToString() : "N/A")},{cpu.FanDuty * 100 / 255},{gpu.FanDuty * 100 / 255},{EcGetCpuRpm()},{EcGetGpuRpm()},{(_gpuTelemetryReady ? _lastGpuTelemetry.UtilizationPercent.ToString() : "0")},{(_gpuTelemetryReady ? _lastGpuTelemetry.PowerWatts.ToString("F1") : "0")}");
                     Thread.Sleep(500);
@@ -898,18 +930,20 @@ namespace X15FanControl
             string logPath = Path.Combine(_verifyDir, $"gpu-calibration-{timestamp}.log");
             _logWriter = new StreamWriter(logPath, false, System.Text.Encoding.UTF8) { AutoFlush = true };
             Log("=== GPU风扇校准开始 ===");
-            
+
+            bool ecInitialized = false;
+            bool gpuManualControlStarted = false;
+
             try
             {
-                // 检查进程泄漏
-                int leaked = GpuTelemetryClient.DetectLeakedProcesses();
-                if (leaked > 0)
-                {
-                    Log($"检测到 {leaked} 个泄漏的nvidia-smi进程，已清理");
-                }
+                // 检测残存nvidia-smi进程（仅报告，不按名清理）
+                int nvidiaCount = GpuTelemetryClient.CountNvidiaSmiProcesses();
+                if (nvidiaCount > 1)
+                    Log($"注意：当前存在 {nvidiaCount} 个 nvidia-smi 进程（包括本程序启动的）");
 
                 // 初始化EC
                 if (!InitEc()) { Log("EC初始化失败"); return 1; }
+                ecInitialized = true;
                 _gpuTelemetry = new GpuTelemetryClient(pollIntervalMs: 1000);
                 if (!_gpuTelemetry.Start())
                 {
@@ -949,29 +983,48 @@ namespace X15FanControl
                 int[] points = { 47, 48, 49, 50, 51, 52, 54 };
                 var records = new List<GpuCalibrationRecord>();
 
+                bool abortRequested = false;
+
                 foreach (int target in points)
                 {
+                    if (abortRequested) break;
+
                     Log($"--- 校准 {target}% ---");
                     var cpuBefore = EcReadRaw(1);
                     var gpuBefore = EcReadRaw(2);
                     _lastGpuTelemetry = _gpuTelemetry.Latest;
                     int cpuTempStart = cpuBefore.Remote;
-                    int gpuTempStart = _lastGpuTelemetry.TemperatureC;
+                    bool telemetryOkNow = _lastGpuTelemetry != null && _lastGpuTelemetry.IsAvailable && !_lastGpuTelemetry.IsStale;
+                    int gpuTempStart = telemetryOkNow ? _lastGpuTelemetry.TemperatureC : 999;
 
                     // 运行中止条件
-                    if (cpuTempStart >= 75) { Log($"⛔ CPU温度={cpuTempStart}°C ≥ 75°C，中止"); break; }
-                    if (gpuTempStart >= 70) { Log($"⛔ GPU温度={gpuTempStart}°C ≥ 70°C，中止"); break; }
-                    if (!_gpuTelemetry.Latest.IsAvailable) { Log("⛔ GPU遥测失效，中止"); break; }
+                    if (cpuTempStart >= 75) { Log($"⛔ CPU温度={cpuTempStart}°C ≥ 75°C，中止"); abortRequested = true; break; }
+                    if (gpuTempStart >= 70) { Log($"⛔ GPU温度={gpuTempStart}°C ≥ 70°C，中止"); abortRequested = true; break; }
+                    if (!telemetryOkNow) { Log("⛔ GPU遥测失效，中止"); abortRequested = true; break; }
 
                     EcSetFanPercent(2, target);
+                    gpuManualControlStarted = true;
 
-                    // 等待过渡期（使用短间隔循环代替长时间Sleep）
+                    // 安全检查辅助函数：返回false表示需要中止
+                    bool CheckAbort()
+                    {
+                        if (!_running) { Log("  用户取消"); return false; }
+                        var cpuNow = EcReadRaw(1);
+                        if (cpuNow.Remote >= 75) { Log($"  ⛔ 采样中CPU温度={cpuNow.Remote}°C ≥ 75°C，中止"); return false; }
+                        _lastGpuTelemetry = _gpuTelemetry?.Latest;
+                        bool telemetryOkNow2 = _lastGpuTelemetry != null && _lastGpuTelemetry.IsAvailable && !_lastGpuTelemetry.IsStale;
+                        if (!telemetryOkNow2) { Log("  ⛔ 采样中GPU遥测失效或过期，中止"); return false; }
+                        if (_lastGpuTelemetry.TemperatureC >= 70) { Log($"  ⛔ 采样中GPU温度={_lastGpuTelemetry.TemperatureC}°C ≥ 70°C，中止"); return false; }
+                        return true;
+                    }
+
+                    // 等待过渡期（每500ms检查一次）
                     for (int i = 0; i < 6; i++)
                     {
                         Thread.Sleep(500);
-                        if (!_running) break; // 检查取消
+                        if (!CheckAbort()) { abortRequested = true; break; }
                     }
-                    if (!_running) break;
+                    if (abortRequested) break;
 
                     // 采集稳定期数据
                     var rpmSamples = new List<int>();
@@ -979,13 +1032,14 @@ namespace X15FanControl
 
                     for (int t = 0; t < 14; t++)
                     {
+                        if (!CheckAbort()) { abortRequested = true; break; }
                         var raw = EcReadRaw(2);
                         int rpm = EcGetGpuRpm();
                         rpmSamples.Add(rpm);
                         dutyRawSamples.Add(raw.FanDuty);
                         Thread.Sleep(500);
-                        if (!_running) break;
                     }
+                    if (abortRequested) break;
 
                     var filteredRpm = FilterRpmSamples(rpmSamples, 3);
                     double avgDutyRaw = dutyRawSamples.Count > 0 ? dutyRawSamples.Average() : 0;
@@ -1020,8 +1074,12 @@ namespace X15FanControl
                 }
 
                 // 恢复Auto
-                EcSetFanAuto(2);
-                Thread.Sleep(500);
+                if (gpuManualControlStarted)
+                {
+                    EcSetFanAuto(2);
+                    Thread.Sleep(500);
+                    Log("GPU风扇已恢复Auto");
+                }
 
                 // 写CSV
                 string csvPath = Path.Combine(_verifyDir, $"gpu-calibration-{timestamp}.csv");
@@ -1063,6 +1121,19 @@ namespace X15FanControl
             }
             finally
             {
+                // 所有退出路径必须恢复GPU Auto
+                if (ecInitialized && gpuManualControlStarted)
+                {
+                    try
+                    {
+                        EcSetFanAuto(2);
+                        Log("finally中恢复GPU Auto完成");
+                    }
+                    catch (Exception autoEx)
+                    {
+                        Log($"恢复GPU Auto失败: {autoEx.Message}");
+                    }
+                }
                 _logWriter?.Dispose();
                 Dispose();
             }
