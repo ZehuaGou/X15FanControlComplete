@@ -693,17 +693,13 @@ namespace X15FanControl
 
         private void UpdateDashboard(FanSnapshot snapshot, ControlDecision decision)
         {
-            _cpuTempLabel.Text = snapshot.CpuTemperatureC > 0 ? snapshot.CpuTemperatureC + " °C" : "—";
-            _cpuDutyLabel.Text = snapshot.CpuDutyPercent + "%";
-            _cpuRpmLabel.Text = snapshot.CpuRpm > 0 ? snapshot.CpuRpm.ToString() : "—";
+            SetDashboardAnimationTarget(snapshot, decision);
 
             // CPU控制状态
             string cpuStateStr = "—";
             if (decision != null && decision.Cpu != null)
             {
                 cpuStateStr = GetControlStateText(decision.Cpu.State, decision.Cpu.DownHoldRemainingSeconds);
-                _cpuFilteredLabel.Text = decision.Cpu.ControlTemperatureC.ToString("0.0") + " °C";
-                _cpuTargetLabel.Text = decision.Cpu.AppliedPercent.ToString("0.0") + "%";
             }
 
             // 更新CPU组框标题显示状态
@@ -724,7 +720,6 @@ namespace X15FanControl
             string gpuStateStr = "—";
             if (_gpuTelemetryReady && _lastGpuTelemetry != null && !_lastGpuTelemetry.IsStale)
             {
-                _gpuTempLabel.Text = snapshot.GpuTemperatureC + " °C";
                 _gpuTempLabel.ForeColor = Color.Black;
                 _gpuNvidiaUtilLabel.Text = _lastGpuTelemetry.UtilizationPercent + "%";
                 _gpuNvidiaPowerLabel.Text = _lastGpuTelemetry.PowerWatts.ToString("F1") + " W";
@@ -736,8 +731,6 @@ namespace X15FanControl
                 if (decision != null && decision.Gpu != null)
                 {
                     gpuStateStr = GetControlStateText(decision.Gpu.State, decision.Gpu.DownHoldRemainingSeconds);
-                    _gpuFilteredLabel.Text = decision.Gpu.ControlTemperatureC.ToString("0.0") + " °C";
-                    _gpuTargetLabel.Text = decision.Gpu.AppliedPercent.ToString("0.0") + "%";
                 }
             }
             else
@@ -765,7 +758,7 @@ namespace X15FanControl
                         gpuStateStr = "等待遥测";
                     }
                 }
-                _gpuTempLabel.Text = "—";
+                SetLabelText(_gpuTempLabel, "—");
                 _gpuTempLabel.ForeColor = Color.Gray;
                 _gpuNvidiaUtilLabel.Text = "—";
                 _gpuNvidiaPowerLabel.Text = "—";
@@ -774,8 +767,6 @@ namespace X15FanControl
                 _gpuNvidiaStatusLabel.Text = status;
                 _gpuNvidiaStatusLabel.ForeColor = statusColor;
             }
-            _gpuDutyLabel.Text = snapshot.GpuDutyPercent + "%";
-            _gpuRpmLabel.Text = snapshot.GpuRpm > 0 ? snapshot.GpuRpm.ToString() : "—";
 
             // 更新GPU组框标题显示状态
             if (_gpuCardBox != null)
@@ -818,19 +809,192 @@ namespace X15FanControl
 
             if (decision == null)
             {
-                _cpuFilteredLabel.Text = "—";
-                _gpuFilteredLabel.Text = "—";
-                _cpuTargetLabel.Text = "—";
-                _gpuTargetLabel.Text = "—";
                 return;
             }
 
-            _cpuFilteredLabel.Text = decision.Cpu.ControlTemperatureC.ToString("0.0") + " °C";
-            _gpuFilteredLabel.Text = decision.Gpu.ControlTemperatureC.ToString("0.0") + " °C";
-            _cpuTargetLabel.Text = decision.Cpu.AppliedPercent.ToString("0.0") + "%";
-            _gpuTargetLabel.Text = decision.Gpu.AppliedPercent.ToString("0.0") + "%";
-
             // 图表点已由UI Timer独立添加，此处不再调用AddHistoryPoint
+        }
+
+        private void SetDashboardAnimationTarget(FanSnapshot snapshot, ControlDecision decision)
+        {
+            bool previousCpuTemperature = _displayCpuTemperature;
+            bool previousGpuTemperature = _displayGpuTemperature;
+            bool previousCpuRpm = _displayCpuRpm;
+            bool previousGpuRpm = _displayGpuRpm;
+            bool previousDecisionValues = _displayDecisionValues;
+
+            _displayCpuTemperature = snapshot.CpuTemperatureC > 0;
+            _displayGpuTemperature = _gpuTelemetryReady &&
+                                     _lastGpuTelemetry != null &&
+                                     !_lastGpuTelemetry.IsStale;
+            _displayCpuRpm = snapshot.CpuRpm > 0;
+            _displayGpuRpm = snapshot.GpuRpm > 0;
+            _displayDecisionValues = decision?.Cpu != null && decision?.Gpu != null;
+
+            DashboardDisplayValues target = new DashboardDisplayValues
+            {
+                CpuTemperature = snapshot.CpuTemperatureC,
+                GpuTemperature = snapshot.GpuTemperatureC,
+                CpuDuty = snapshot.CpuDutyPercent,
+                GpuDuty = snapshot.GpuDutyPercent,
+                CpuRpm = snapshot.CpuRpm,
+                GpuRpm = snapshot.GpuRpm,
+                CpuFilteredTemperature = _displayDecisionValues ? decision.Cpu.ControlTemperatureC : 0,
+                GpuFilteredTemperature = _displayDecisionValues ? decision.Gpu.ControlTemperatureC : 0,
+                CpuTarget = _displayDecisionValues ? decision.Cpu.AppliedPercent : 0,
+                GpuTarget = _displayDecisionValues ? decision.Gpu.AppliedPercent : 0
+            };
+
+            if (!_dashboardAnimationInitialized)
+            {
+                _dashboardAnimationInitialized = true;
+                _dashboardAnimationFrom = target;
+                _dashboardAnimationCurrent = target;
+                _dashboardAnimationTarget = target;
+                _dashboardAnimationStartedUtc = DateTime.UtcNow;
+                RenderDashboardValues();
+                return;
+            }
+
+            _dashboardAnimationFrom = _dashboardAnimationCurrent;
+            _dashboardAnimationTarget = target;
+
+            // A value becoming available should appear at its real value, not animate up from zero.
+            if (!previousCpuTemperature && _displayCpuTemperature)
+                _dashboardAnimationFrom.CpuTemperature = target.CpuTemperature;
+            if (!previousGpuTemperature && _displayGpuTemperature)
+                _dashboardAnimationFrom.GpuTemperature = target.GpuTemperature;
+            if (!previousCpuRpm && _displayCpuRpm)
+                _dashboardAnimationFrom.CpuRpm = target.CpuRpm;
+            if (!previousGpuRpm && _displayGpuRpm)
+                _dashboardAnimationFrom.GpuRpm = target.GpuRpm;
+            if (!previousDecisionValues && _displayDecisionValues)
+            {
+                _dashboardAnimationFrom.CpuFilteredTemperature = target.CpuFilteredTemperature;
+                _dashboardAnimationFrom.GpuFilteredTemperature = target.GpuFilteredTemperature;
+                _dashboardAnimationFrom.CpuTarget = target.CpuTarget;
+                _dashboardAnimationFrom.GpuTarget = target.GpuTarget;
+            }
+
+            _dashboardAnimationCurrent = _dashboardAnimationFrom;
+            _dashboardAnimationStartedUtc = DateTime.UtcNow;
+            RenderDashboardValues();
+            if (DashboardDisplayValuesEqual(_dashboardAnimationFrom, _dashboardAnimationTarget))
+            {
+                _dashboardAnimationTimer.Stop();
+            }
+            else
+            {
+                _dashboardAnimationTimer.Start();
+            }
+        }
+
+        private void DashboardAnimationTick(object sender, EventArgs e)
+        {
+            if (_closing || !_dashboardAnimationInitialized ||
+                !Visible || !ShowInTaskbar || WindowState == FormWindowState.Minimized)
+            {
+                return;
+            }
+
+            double progress = (DateTime.UtcNow - _dashboardAnimationStartedUtc).TotalMilliseconds /
+                              DashboardAnimationDurationMs;
+            progress = Math.Max(0.0, Math.Min(1.0, progress));
+            double eased = 1.0 - Math.Pow(1.0 - progress, 3.0);
+            _dashboardAnimationCurrent = InterpolateDashboardValues(
+                _dashboardAnimationFrom,
+                _dashboardAnimationTarget,
+                eased);
+            RenderDashboardValues();
+            if (progress >= 1.0)
+            {
+                _dashboardAnimationCurrent = _dashboardAnimationTarget;
+                _dashboardAnimationTimer.Stop();
+            }
+        }
+
+        private static DashboardDisplayValues InterpolateDashboardValues(
+            DashboardDisplayValues from,
+            DashboardDisplayValues target,
+            double amount)
+        {
+            return new DashboardDisplayValues
+            {
+                CpuTemperature = Lerp(from.CpuTemperature, target.CpuTemperature, amount),
+                GpuTemperature = Lerp(from.GpuTemperature, target.GpuTemperature, amount),
+                CpuDuty = Lerp(from.CpuDuty, target.CpuDuty, amount),
+                GpuDuty = Lerp(from.GpuDuty, target.GpuDuty, amount),
+                CpuRpm = Lerp(from.CpuRpm, target.CpuRpm, amount),
+                GpuRpm = Lerp(from.GpuRpm, target.GpuRpm, amount),
+                CpuFilteredTemperature = Lerp(from.CpuFilteredTemperature, target.CpuFilteredTemperature, amount),
+                GpuFilteredTemperature = Lerp(from.GpuFilteredTemperature, target.GpuFilteredTemperature, amount),
+                CpuTarget = Lerp(from.CpuTarget, target.CpuTarget, amount),
+                GpuTarget = Lerp(from.GpuTarget, target.GpuTarget, amount)
+            };
+        }
+
+        private static double Lerp(double from, double target, double amount)
+        {
+            return from + (target - from) * amount;
+        }
+
+        private static bool DashboardDisplayValuesEqual(
+            DashboardDisplayValues left,
+            DashboardDisplayValues right)
+        {
+            return left.CpuTemperature == right.CpuTemperature &&
+                   left.GpuTemperature == right.GpuTemperature &&
+                   left.CpuDuty == right.CpuDuty &&
+                   left.GpuDuty == right.GpuDuty &&
+                   left.CpuRpm == right.CpuRpm &&
+                   left.GpuRpm == right.GpuRpm &&
+                   left.CpuFilteredTemperature == right.CpuFilteredTemperature &&
+                   left.GpuFilteredTemperature == right.GpuFilteredTemperature &&
+                   left.CpuTarget == right.CpuTarget &&
+                   left.GpuTarget == right.GpuTarget;
+        }
+
+        private void RenderDashboardValues()
+        {
+            SetLabelText(_cpuTempLabel, _displayCpuTemperature
+                ? Math.Round(_dashboardAnimationCurrent.CpuTemperature).ToString("0") + " °C"
+                : "—");
+            SetLabelText(_gpuTempLabel, _displayGpuTemperature
+                ? Math.Round(_dashboardAnimationCurrent.GpuTemperature).ToString("0") + " °C"
+                : "—");
+            SetLabelText(_cpuDutyLabel, Math.Round(_dashboardAnimationCurrent.CpuDuty).ToString("0") + "%");
+            SetLabelText(_gpuDutyLabel, Math.Round(_dashboardAnimationCurrent.GpuDuty).ToString("0") + "%");
+            SetLabelText(_cpuRpmLabel, _displayCpuRpm
+                ? Math.Round(_dashboardAnimationCurrent.CpuRpm).ToString("0")
+                : "—");
+            SetLabelText(_gpuRpmLabel, _displayGpuRpm
+                ? Math.Round(_dashboardAnimationCurrent.GpuRpm).ToString("0")
+                : "—");
+
+            if (_displayDecisionValues)
+            {
+                SetLabelText(_cpuFilteredLabel,
+                    _dashboardAnimationCurrent.CpuFilteredTemperature.ToString("0.0") + " °C");
+                SetLabelText(_gpuFilteredLabel,
+                    _dashboardAnimationCurrent.GpuFilteredTemperature.ToString("0.0") + " °C");
+                SetLabelText(_cpuTargetLabel, _dashboardAnimationCurrent.CpuTarget.ToString("0.0") + "%");
+                SetLabelText(_gpuTargetLabel, _dashboardAnimationCurrent.GpuTarget.ToString("0.0") + "%");
+            }
+            else
+            {
+                SetLabelText(_cpuFilteredLabel, "—");
+                SetLabelText(_gpuFilteredLabel, "—");
+                SetLabelText(_cpuTargetLabel, "—");
+                SetLabelText(_gpuTargetLabel, "—");
+            }
+        }
+
+        private static void SetLabelText(Label label, string text)
+        {
+            if (label != null && label.Text != text)
+            {
+                label.Text = text;
+            }
         }
 
         private static string GetControlStateText(ControlState state, double downHoldRemaining)
@@ -1200,6 +1364,7 @@ namespace X15FanControl
             // 最小化按钮：窗口进入任务栏，不隐藏到托盘
             if (WindowState == FormWindowState.Minimized)
             {
+                _dashboardAnimationTimer.Stop();
                 if (_calibrationActive)
                 {
                     if (!StopCalibration("窗口最小化"))
@@ -1217,6 +1382,11 @@ namespace X15FanControl
                 }
 
                 // ShowInTaskbar保持true，用户可点击任务栏恢复
+            }
+            else if (_dashboardAnimationInitialized &&
+                     !DashboardDisplayValuesEqual(_dashboardAnimationCurrent, _dashboardAnimationTarget))
+            {
+                _dashboardAnimationTimer.Start();
             }
         }
 
@@ -1307,6 +1477,7 @@ namespace X15FanControl
             if (_closing) return;
             _closing = true;
             _mainTimer.Stop();
+            _dashboardAnimationTimer.Stop();
             _runMode = RunMode.ReadOnly;
 
             AppendLog("Control loop cancellation requested");
@@ -1367,6 +1538,7 @@ namespace X15FanControl
                 _notifyIcon.Dispose();
                 _notifyIcon = null;
             }
+            _dashboardAnimationTimer.Dispose();
             SystemEvents.PowerModeChanged -= SystemEventsPowerModeChanged;
 
             // 清理完成后再次Close；FormClosing通过_allowFinalClose明确放行。

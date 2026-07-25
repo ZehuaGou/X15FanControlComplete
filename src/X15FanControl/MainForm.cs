@@ -24,6 +24,7 @@ namespace X15FanControl
         private readonly string _heartbeatPath;
         private readonly string _watchdogLogPath;
         private readonly System.Windows.Forms.Timer _mainTimer;
+        private readonly System.Windows.Forms.Timer _dashboardAnimationTimer;
 
         // Background control loop (separate from UI thread)
         private System.Threading.CancellationTokenSource _controlCts;
@@ -70,6 +71,19 @@ namespace X15FanControl
 
         // Chart downsampling
         private DateTime _lastChartSampleUtc = DateTime.MinValue;
+
+        // Dashboard animation is presentation-only. It never feeds values back to the controller.
+        private const int DashboardAnimationDurationMs = 280;
+        private bool _dashboardAnimationInitialized;
+        private DateTime _dashboardAnimationStartedUtc;
+        private DashboardDisplayValues _dashboardAnimationFrom;
+        private DashboardDisplayValues _dashboardAnimationCurrent;
+        private DashboardDisplayValues _dashboardAnimationTarget;
+        private bool _displayCpuTemperature;
+        private bool _displayGpuTemperature;
+        private bool _displayCpuRpm;
+        private bool _displayGpuRpm;
+        private bool _displayDecisionValues;
 
         // Thread safety
         private readonly object _engineLock = new object();
@@ -149,6 +163,13 @@ namespace X15FanControl
             MinimumSize = new Size(1080, 720);
             Size = new Size(1250, 820);
             Font = new Font("Segoe UI", 9F);
+            BackColor = SystemColors.Control;
+            DoubleBuffered = true;
+            ResizeRedraw = true;
+            SetStyle(ControlStyles.AllPaintingInWmPaint |
+                     ControlStyles.OptimizedDoubleBuffer |
+                     ControlStyles.UserPaint, true);
+            UpdateStyles();
 
             _dataDirectory = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData), "X15FanControl");
             _configPath = Path.Combine(_dataDirectory, "config.json");
@@ -161,6 +182,8 @@ namespace X15FanControl
 
             _mainTimer = new Timer();
             _mainTimer.Tick += MainTimerTick;
+            _dashboardAnimationTimer = new Timer { Interval = 33 };
+            _dashboardAnimationTimer.Tick += DashboardAnimationTick;
 
             Load += MainFormLoad;
             Shown += MainForm_Shown;
@@ -409,6 +432,12 @@ namespace X15FanControl
             ShowInTaskbar = true;
             Show();
             WindowState = FormWindowState.Normal;
+            if (_dashboardAnimationInitialized &&
+                !DashboardDisplayValuesEqual(_dashboardAnimationCurrent, _dashboardAnimationTarget))
+            {
+                _dashboardAnimationTimer.Start();
+            }
+            Invalidate(true);
             Activate();
             BringToFront();
         }
@@ -431,15 +460,35 @@ namespace X15FanControl
                 NotifyCalibrationWindowActionStopped();
             }
 
+            _dashboardAnimationTimer.Stop();
+            Hide();
+            // Hide first: changing ShowInTaskbar while visible recreates the native handle
+            // and briefly exposes an unpainted white client area.
+            ShowInTaskbar = false;
+
             if (!_trayHintShown)
             {
                 _trayHintShown = true;
-                _notifyIcon.ShowBalloonTip(3000, "X15 风扇控制",
-                    "仍在后台运行。右键托盘图标可恢复窗口或退出。",
-                    ToolTipIcon.Info);
+                AppendLog("窗口已隐藏到托盘。右键托盘图标可恢复窗口或退出。");
             }
-            ShowInTaskbar = false;
-            Hide();
+        }
+
+        protected override void WndProc(ref Message message)
+        {
+            const int WmSysCommand = 0x0112;
+            const int ScClose = 0xF060;
+
+            if (message.Msg == WmSysCommand &&
+                (message.WParam.ToInt64() & 0xFFF0) == ScClose &&
+                !_explicitExitRequested &&
+                !_allowFinalClose)
+            {
+                // Handle the title-bar close command before WinForms begins its close/repaint cycle.
+                HideToTray();
+                return;
+            }
+
+            base.WndProc(ref message);
         }
 
         private void NotifyCalibrationWindowActionStopped()
@@ -453,6 +502,20 @@ namespace X15FanControl
         {
             _explicitExitRequested = true;
             Close();
+        }
+
+        private struct DashboardDisplayValues
+        {
+            public double CpuTemperature;
+            public double GpuTemperature;
+            public double CpuDuty;
+            public double GpuDuty;
+            public double CpuRpm;
+            public double GpuRpm;
+            public double CpuFilteredTemperature;
+            public double GpuFilteredTemperature;
+            public double CpuTarget;
+            public double GpuTarget;
         }
 
         private bool IsStartupTaskRegistered()
