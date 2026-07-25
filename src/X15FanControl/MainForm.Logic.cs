@@ -5,7 +5,9 @@ using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using X15FanCore.Control;
 using X15FanCore.Models;
@@ -848,6 +850,10 @@ namespace X15FanControl
             }
             _modeStatusLabel.Text = text;
             _modeStatusPanel.BackColor = backColor;
+
+            // 更新托盘菜单中的模式状态
+            if (_trayModeItem != null)
+                _trayModeItem.Text = "当前模式：" + text;
         }
 
         private async void FlashModeBadge()
@@ -955,31 +961,91 @@ namespace X15FanControl
             }
         }
 
+        // 异步日志后台写入循环
+        private async Task LogFlushLoop(CancellationToken token)
+        {
+            while (!token.IsCancellationRequested)
+            {
+                try
+                {
+                    await Task.Delay(500, token);
+                    FlushLogQueue();
+                }
+                catch (OperationCanceledException) { break; }
+                catch { }
+            }
+            // 退出前最后一次Flush
+            FlushLogQueue();
+        }
+
+        private void FlushLogQueue()
+        {
+            if (_logQueue.IsEmpty) return;
+
+            var sb = new StringBuilder();
+            string line;
+            int count = 0;
+            while (_logQueue.TryDequeue(out line) && count < 100)
+            {
+                sb.AppendLine(line);
+                count++;
+            }
+
+            if (sb.Length > 0)
+            {
+                try
+                {
+                    string logPath = Path.Combine(_dataDirectory, "application.log");
+                    File.AppendAllText(logPath, sb.ToString());
+                }
+                catch { }
+            }
+        }
+
         private void AppendLog(string message)
         {
-            if (_logTextBox != null && !_logTextBox.IsDisposed && _logTextBox.InvokeRequired)
-            {
-                try { _logTextBox.BeginInvoke(new Action<string>(AppendLog), message); }
-                catch { }
-                return;
-            }
-
             string line = DateTime.Now.ToString("HH:mm:ss.fff") + "  " + message;
-            if (_logTextBox != null && !_logTextBox.IsDisposed)
-                _logTextBox.AppendText(line + Environment.NewLine);
 
-            try
+            // 加入异步日志队列（后台线程批量写入文件）
+            _logQueue.Enqueue(DateTime.Now.ToString("O") + "  " + message + Environment.NewLine);
+
+            // UI线程更新文本框（限流，Batch写入）
+            if (_logTextBox != null && !_logTextBox.IsDisposed)
             {
-                File.AppendAllText(Path.Combine(_dataDirectory, "application.log"), DateTime.Now.ToString("O") + "  " + message + Environment.NewLine);
+                try
+                {
+                    _logTextBox.BeginInvoke(new Action(() =>
+                    {
+                        _logTextBox.AppendText(line + Environment.NewLine);
+                        _currentLogLines++;
+                        // 超过限制时批量删除旧行
+                        if (_currentLogLines > _config.MaxUiLogLines)
+                        {
+                            int remove = _config.MaxUiLogLines / 2;
+                            var text = _logTextBox.Text;
+                            int idx = 0;
+                            for (int i = 0; i < remove; i++)
+                            {
+                                int next = text.IndexOf(Environment.NewLine, idx);
+                                if (next < 0) break;
+                                idx = next + Environment.NewLine.Length;
+                            }
+                            if (idx > 0)
+                                _logTextBox.Text = text.Substring(idx);
+                            _currentLogLines -= remove;
+                        }
+                    }));
+                }
+                catch { }
             }
-            catch { }
         }
 
         private void MainFormResize(object sender, EventArgs e)
         {
+            // 最小化按钮：窗口进入任务栏，不隐藏到托盘
             if (WindowState == FormWindowState.Minimized)
             {
-                Hide();
+                // ShowInTaskbar保持true，用户可点击任务栏恢复
             }
         }
 
@@ -1022,8 +1088,19 @@ namespace X15FanControl
 
         private void MainFormClosing(object sender, FormClosingEventArgs e)
         {
+            // 关闭 × → 隐藏到托盘，不退出
+            if (e.CloseReason == CloseReason.UserClosing && !_explicitExitRequested)
+            {
+                e.Cancel = true;
+                HideToTray();
+                return;
+            }
+
+            // 真正退出：完整清理
             _closing = true;
             _mainTimer.Stop();
+            _logCts?.Cancel();
+
             InvalidateVerificationTasks();
             StopCalibration("应用程序关闭");
             RestoreAuto("应用程序关闭");
@@ -1031,6 +1108,12 @@ namespace X15FanControl
             _heartbeat?.WriteStop();
             _csvLogger?.Dispose();
             _csvLogger = null;
+
+            // Flush remaining log queue
+            _logCts?.Cancel();
+            try { _logFlushTask?.Wait(2000); } catch { }
+            FlushLogQueue();
+
             if (_gpuTelemetry != null)
             {
                 _gpuTelemetry.Dispose();

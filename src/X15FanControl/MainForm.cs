@@ -1,11 +1,14 @@
 using Microsoft.Win32;
 using System;
+using System.Collections.Concurrent;
 using System.Collections.Generic;
 using System.ComponentModel;
 using System.Diagnostics;
 using System.Drawing;
 using System.IO;
 using System.Linq;
+using System.Text;
+using System.Threading.Tasks;
 using System.Windows.Forms;
 using System.Windows.Forms.DataVisualization.Charting;
 using X15FanCore.Control;
@@ -20,7 +23,7 @@ namespace X15FanControl
         private readonly string _configPath;
         private readonly string _heartbeatPath;
         private readonly string _watchdogLogPath;
-        private readonly Timer _mainTimer;
+        private readonly System.Windows.Forms.Timer _mainTimer;
 
         private ClevoEcInfo _ec;
         private readonly System.Threading.SemaphoreSlim _ecLock = new System.Threading.SemaphoreSlim(1, 1);
@@ -41,6 +44,20 @@ namespace X15FanControl
         private NotifyIcon _notifyIcon;
         private DateTime _lastTickUtc;
         private bool _closing;
+
+        // Window behavior
+        private bool _explicitExitRequested;
+        private bool _trayHintShown;
+        private bool _startMinimizedToTray;
+        private ToolStripMenuItem _trayModeItem;
+
+        // Async logging
+        private readonly ConcurrentQueue<string> _logQueue = new ConcurrentQueue<string>();
+        private System.Threading.CancellationTokenSource _logCts;
+        private Task _logFlushTask;
+        private int _currentLogLines;
+
+        // No separate fields needed for now
 
         // Sensor stall detection (CPU only)
         private int _cpuTempStallCount;
@@ -108,8 +125,9 @@ namespace X15FanControl
         private readonly List<CalibrationRecord> _calibrationRecords = new List<CalibrationRecord>();
         private FanSnapshot _lastSnapshot;
 
-        public MainForm()
+        public MainForm(bool startMinimized = false)
         {
+            _startMinimizedToTray = startMinimized;
             Text = "X15 风扇控制 — 静音稳定控制器";
             StartPosition = FormStartPosition.CenterScreen;
             MinimumSize = new Size(1080, 720);
@@ -133,6 +151,10 @@ namespace X15FanControl
             FormClosing += MainFormClosing;
             Resize += MainFormResize;
             SystemEvents.PowerModeChanged += SystemEventsPowerModeChanged;
+
+            // Start background log flush task
+            _logCts = new System.Threading.CancellationTokenSource();
+            _logFlushTask = Task.Run(() => LogFlushLoop(_logCts.Token));
         }
 
         private void MainFormLoad(object sender, EventArgs e)
@@ -181,6 +203,12 @@ namespace X15FanControl
                 AppendLog("初始化异常：" + ex.Message);
                 _hardwareStatusLabel.Text = "初始化异常：" + ex.Message;
                 _hardwareStatusLabel.ForeColor = Color.Red;
+            }
+
+            // 如果命令行指定 --minimized，初始化完成后隐藏到托盘
+            if (_startMinimizedToTray)
+            {
+                HideToTray();
             }
         }
 
@@ -315,10 +343,22 @@ namespace X15FanControl
         private void BuildTrayIcon()
         {
             ContextMenuStrip menu = new ContextMenuStrip();
-            menu.Items.Add("打开", null, delegate { ShowFromTray(); });
-            menu.Items.Add("恢复自动", null, delegate { RestoreAuto("Tray command"); });
+            menu.Items.Add("打开主窗口", null, delegate { ShowFromTray(); });
+
+            _trayModeItem = new ToolStripMenuItem("当前模式：只读") { Enabled = false };
+            menu.Items.Add(_trayModeItem);
+
+            menu.Items.Add("恢复原厂自动", null, delegate { RestoreAuto("Tray command"); });
+
+            var startupItem = new ToolStripMenuItem("开机自动启动")
+            {
+                Checked = IsStartupTaskRegistered()
+            };
+            startupItem.Click += delegate { ToggleStartupTask(); };
+            menu.Items.Add(startupItem);
+
             menu.Items.Add(new ToolStripSeparator());
-            menu.Items.Add("退出", null, delegate { Close(); });
+            menu.Items.Add("退出", null, delegate { ExitApplication(); });
             _notifyIcon = new NotifyIcon
             {
                 Text = "X15 风扇控制",
@@ -331,9 +371,129 @@ namespace X15FanControl
 
         private void ShowFromTray()
         {
+            ShowInTaskbar = true;
             Show();
             WindowState = FormWindowState.Normal;
             Activate();
+            BringToFront();
+        }
+
+        private void HideToTray()
+        {
+            if (!_trayHintShown)
+            {
+                _trayHintShown = true;
+                _notifyIcon.ShowBalloonTip(3000, "X15 风扇控制",
+                    "仍在后台运行。右键托盘图标可恢复窗口或退出。",
+                    ToolTipIcon.Info);
+            }
+            ShowInTaskbar = false;
+            Hide();
+        }
+
+        private void ExitApplication()
+        {
+            _explicitExitRequested = true;
+            Close();
+        }
+
+        private bool IsStartupTaskRegistered()
+        {
+            try
+            {
+                var psi = new ProcessStartInfo("schtasks.exe", "/Query /TN \"X15FanControl\" /FO CSV /NH")
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+                using (var p = Process.Start(psi))
+                {
+                    string output = p.StandardOutput.ReadToEnd();
+                    p.WaitForExit(3000);
+                    return p.ExitCode == 0 && !string.IsNullOrEmpty(output);
+                }
+            }
+            catch { return false; }
+        }
+
+        private bool RegisterStartupTask()
+        {
+            try
+            {
+                string exePath = System.Reflection.Assembly.GetExecutingAssembly().Location;
+                if (string.IsNullOrEmpty(exePath) || !File.Exists(exePath))
+                    exePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "X15FanControl.exe");
+                if (!File.Exists(exePath)) return false;
+
+                string args = string.Format("/Create /TN \"X15FanControl\" /TR \"\\\"{0}\\\" --autostart --minimized\" /SC ONLOGON /RL HIGHEST /F",
+                    exePath);
+                var psi = new ProcessStartInfo("schtasks.exe", args)
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+                using (var p = Process.Start(psi))
+                {
+                    p.WaitForExit(5000);
+                    return p.ExitCode == 0;
+                }
+            }
+            catch { return false; }
+        }
+
+        private bool UnregisterStartupTask()
+        {
+            try
+            {
+                var psi = new ProcessStartInfo("schtasks.exe", "/Delete /TN \"X15FanControl\" /F")
+                {
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true
+                };
+                using (var p = Process.Start(psi))
+                {
+                    p.WaitForExit(5000);
+                    return p.ExitCode == 0;
+                }
+            }
+            catch { return false; }
+        }
+
+        private void ToggleStartupTask()
+        {
+            bool currentlyRegistered = IsStartupTaskRegistered();
+            bool success;
+            if (currentlyRegistered)
+            {
+                success = UnregisterStartupTask();
+                if (success)
+                {
+                    AppendLog("开机自启动已关闭");
+                    _config.StartWithWindows = false;
+                }
+            }
+            else
+            {
+                success = RegisterStartupTask();
+                if (success)
+                {
+                    AppendLog("开机自启动已开启");
+                    _config.StartWithWindows = true;
+                }
+            }
+
+            if (!success)
+            {
+                AppendLog("修改开机自启动失败，请以管理员权限运行");
+                MessageBox.Show("修改开机自启动失败。\r\n请以管理员权限运行本程序后重试。",
+                    "开机自启动", MessageBoxButtons.OK, MessageBoxIcon.Warning);
+            }
         }
 
         private void BuildUserInterface()

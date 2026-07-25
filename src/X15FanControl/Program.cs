@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Threading;
 using System.Windows.Forms;
@@ -85,25 +86,34 @@ namespace X15FanControl
 
             try
             {
+                // Parse GUI-specific flags that don't block GUI mode
+                bool startMinimized = false;
+                var cliArgs = new List<string>();
+                foreach (string arg in args)
+                {
+                    if (arg == "--minimized") startMinimized = true;
+                    else cliArgs.Add(arg);
+                }
+
                 // 命令行模式：优先解析参数，绝不创建GUI
-                if (args.Length > 0)
+                if (cliArgs.Count > 0)
                 {
                     try
                     {
                         using (var verifier = new AutoVerification())
                         {
-                            if (args[0] == "--verify-cpu-calibration")
+                            if (cliArgs[0] == "--verify-cpu-calibration")
                                 return verifier.Run();
-                            if (args[0] == "--verify-normal-use-readonly")
+                            if (cliArgs[0] == "--verify-normal-use-readonly")
                                 return verifier.RunNormalUseReadOnly(15);
-                            if (args[0] == "--verify-normal-use-active")
+                            if (cliArgs[0] == "--verify-normal-use-active")
                                 return verifier.RunNormalUseActive(15);
-                            if (args[0] == "--verify-gpu-calibration")
+                            if (cliArgs[0] == "--verify-gpu-calibration")
                                 return verifier.RunGpuCalibration();
-                            if (args[0] == "--verify-gpu-active")
+                            if (cliArgs[0] == "--verify-gpu-active")
                                 return verifier.RunGpuActive(15);
                         }
-                        Console.WriteLine($"未知命令: {args[0]}");
+                        Console.WriteLine($"未知命令: {cliArgs[0]}");
                         return 1;
                     }
                     catch (Exception ex)
@@ -113,7 +123,7 @@ namespace X15FanControl
                     }
                 }
 
-                // GUI模式：仅在无参数时启动
+                // GUI模式
                 Application.EnableVisualStyles();
                 Application.SetCompatibleTextRenderingDefault(false);
                 Application.ThreadException += delegate (object sender, ThreadExceptionEventArgs args2)
@@ -133,7 +143,7 @@ namespace X15FanControl
                     }
                 };
 
-                Application.Run(new MainForm());
+                Application.Run(new MainForm(startMinimized));
             }
             finally
             {

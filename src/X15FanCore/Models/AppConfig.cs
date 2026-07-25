@@ -17,6 +17,13 @@ namespace X15FanCore.Models
             Profiles = new List<FanProfile>();
             CalibrationNoisyPointsCpu = new List<int>();
             CalibrationNoisyPointsGpu = new List<int>();
+            StartWithWindows = false;
+            StartMinimizedToTray = true;
+            AutoEnterActiveOnStartup = false;
+            DetailedVerificationLogging = false;
+            UiRefreshIntervalMs = 500;
+            ChartSampleIntervalMs = 1000;
+            MaxUiLogLines = 1500;
         }
 
         [DataMember(Order = 1)]
@@ -45,5 +52,27 @@ namespace X15FanCore.Models
 
         [DataMember(Order = 9)]
         public List<int> CalibrationNoisyPointsGpu { get; set; }
+
+        // --- Desktop experience settings ---
+        [DataMember(Order = 10)]
+        public bool StartWithWindows { get; set; }
+
+        [DataMember(Order = 11)]
+        public bool StartMinimizedToTray { get; set; }
+
+        [DataMember(Order = 12)]
+        public bool AutoEnterActiveOnStartup { get; set; }
+
+        [DataMember(Order = 13)]
+        public bool DetailedVerificationLogging { get; set; }
+
+        [DataMember(Order = 14)]
+        public int UiRefreshIntervalMs { get; set; }
+
+        [DataMember(Order = 15)]
+        public int ChartSampleIntervalMs { get; set; }
+
+        [DataMember(Order = 16)]
+        public int MaxUiLogLines { get; set; }
     }
 }
