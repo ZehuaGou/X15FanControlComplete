@@ -189,9 +189,10 @@ namespace X15FanControl
                 }
             }
 
-            // ReadOnly/Simulation 必须明确交还 EC；Active 才启动心跳与看门狗。
+            // ReadOnly/Simulation 必须先使验证任务失效，再交还EC
             if (requestedMode != RunMode.Active)
             {
+                InvalidateVerificationTasks();
                 EcRestoreAllAuto();
                 StopWatchdog();
                 _heartbeat?.WriteStop();

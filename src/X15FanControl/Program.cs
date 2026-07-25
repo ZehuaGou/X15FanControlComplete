@@ -13,39 +13,40 @@ namespace X15FanControl
         private static int Main(string[] args)
         {
             // 所有模式（GUI和CLI）必须先获取全局EC互斥锁
-            bool createdNew;
+            // 所有进程都必须显式获取所有权：不依赖createdNew
             Mutex ecMutex = null;
+            bool ownsMutex = false;
             bool abandoned = false;
 
             try
             {
-                ecMutex = new Mutex(false, EcMutexName, out createdNew);
+                ecMutex = new Mutex(false, EcMutexName);
 
-                if (!createdNew)
+                try
                 {
-                    try
+                    // 立即尝试获取，不等待
+                    ownsMutex = ecMutex.WaitOne(0, false);
+                }
+                catch (AbandonedMutexException)
+                {
+                    // 上一个进程异常退出，我们取得所有权
+                    ownsMutex = true;
+                    abandoned = true;
+                }
+
+                if (!ownsMutex)
+                {
+                    if (args.Length > 0)
                     {
-                        // 等待现有进程释放（最多3秒）
-                        if (!ecMutex.WaitOne(3000, false))
-                        {
-                            if (args.Length > 0)
-                            {
-                                Console.Error.WriteLine("错误：另一个 X15FanControl 实例正在运行。");
-                                Console.Error.WriteLine("请先关闭已有实例再重试。");
-                                return 2;
-                            }
-                            else
-                            {
-                                MessageBox.Show("X15 风扇控制已在运行中。", "X15 风扇控制",
-                                    MessageBoxButtons.OK, MessageBoxIcon.Information);
-                                return 1;
-                            }
-                        }
+                        Console.Error.WriteLine("错误：另一个 X15FanControl 实例正在运行。");
+                        Console.Error.WriteLine("请先关闭已有实例再重试。");
+                        return 2;
                     }
-                    catch (AbandonedMutexException)
+                    else
                     {
-                        // 上一个进程异常退出，我们取得所有权
-                        abandoned = true;
+                        MessageBox.Show("X15 风扇控制已在运行中。", "X15 风扇控制",
+                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        return 1;
                     }
                 }
             }
@@ -136,16 +137,16 @@ namespace X15FanControl
             }
             finally
             {
-                // 释放EC互斥锁
-                if (ecMutex != null)
+                // 仅当实际拥有Mutex时才释放
+                if (ownsMutex)
                 {
                     try
                     {
                         ecMutex.ReleaseMutex();
                     }
                     catch { }
-                    ecMutex.Dispose();
                 }
+                ecMutex?.Dispose();
             }
 
             return 0;

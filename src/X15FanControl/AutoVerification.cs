@@ -311,7 +311,15 @@ namespace X15FanControl
                 }
                 else
                 {
-                    Log($"  RPM数据无效（前={beforeRpm}, 后={rpm3000}），无法判断方向");
+                    Log($"  RPM数据无效（前={beforeRpm}, 后={rpm3000}），无法判断方向，标记为警告但不阻止");
+                }
+
+                // RPM方向异常必须使本次验证失败
+                if (!rpmDirectionOk)
+                {
+                    Log($"  ⚠ RPM方向异常，验证失败");
+                    EcSetFanAuto(1);
+                    return false;
                 }
 
                 // 保持稳定
@@ -378,17 +386,25 @@ namespace X15FanControl
                     Thread.Sleep(sampleInterval);
                 }
 
-                // 计算统计数据
-                double avgRpm = rpmSamples.Count > 0 ? rpmSamples.Average() : 0;
-                double minRpm = rpmSamples.Count > 0 ? rpmSamples.Min() : 0;
-                double maxRpm = rpmSamples.Count > 0 ? rpmSamples.Max() : 0;
+                // 计算统计数据（包含MAD异常值过滤）
+                int rawSampleCount = rpmSamples.Count;
+                var filteredRpmData = FilterRpmMad(rpmSamples, 3.0); // MAD阈值3.0
+                double medianRpm = filteredRpmData.Median;
+                double filteredAvgRpm = filteredRpmData.FilteredMean;
+                double filteredMinRpm = filteredRpmData.FilteredMin;
+                double filteredMaxRpm = filteredRpmData.FilteredMax;
+                double filteredRpmStdDev = filteredRpmData.FilteredStdDev;
+                int filteredSampleCount = filteredRpmData.FilteredCount;
+                int outlierCount = filteredRpmData.OutlierCount;
+                double rawMinRpm = rpmSamples.Count > 0 ? rpmSamples.Min() : 0;
+                double rawMaxRpm = rpmSamples.Count > 0 ? rpmSamples.Max() : 0;
+
                 double avgDutyRaw = dutySamples.Count > 0 ? dutySamples.Average() : 0;
                 double avgDutyPct = avgDutyRaw * 100.0 / 255.0;
                 double minDutyRaw = dutySamples.Count > 0 ? dutySamples.Min() : 0;
                 double maxDutyRaw = dutySamples.Count > 0 ? dutySamples.Max() : 0;
                 double minDutyPct = minDutyRaw * 100.0 / 255.0;
                 double maxDutyPct = maxDutyRaw * 100.0 / 255.0;
-                double rpmStdDev = rpmSamples.Count > 1 ? Math.Sqrt(rpmSamples.Average(v => Math.Pow(v - avgRpm, 2))) : 0;
                 double avgTemp = tempSamples.Count > 0 ? tempSamples.Average() : 0;
 
                 var record = new CalibrationRecordData
@@ -400,10 +416,16 @@ namespace X15FanControl
                     MaxDutyRaw = (int)Math.Round(maxDutyRaw),
                     MinDutyPct = minDutyPct,
                     MaxDutyPct = maxDutyPct,
-                    AvgRpm = avgRpm,
-                    MinRpm = minRpm,
-                    MaxRpm = maxRpm,
-                    RpmStdDev = rpmStdDev,
+                    AvgRpm = filteredAvgRpm,
+                    MinRpm = filteredMinRpm,
+                    MaxRpm = filteredMaxRpm,
+                    MedianRpm = medianRpm,
+                    RpmStdDev = filteredRpmStdDev,
+                    RawSampleCount = rawSampleCount,
+                    FilteredSampleCount = filteredSampleCount,
+                    OutlierCount = outlierCount,
+                    RawMinRpm = rawMinRpm,
+                    RawMaxRpm = rawMaxRpm,
                     CpuTempStart = tempBefore.Remote,
                     CpuTempEnd = avgTemp,
                     GpuTempStart = _lastGpuTelemetry?.TemperatureC ?? 0,
@@ -413,7 +435,8 @@ namespace X15FanControl
                 };
                 calibrationRecords.Add(record);
 
-                Log($"  稳定后RPM: {warmRpm}, 平均RPM: {avgRpm:F0} (min={minRpm:F0}, max={maxRpm:F0}, σ={rpmStdDev:F0})");
+                Log($"  稳定后RPM: {warmRpm}, 过滤后平均RPM: {filteredAvgRpm:F0} (中位数={medianRpm:F0}, min={filteredMinRpm:F0}, max={filteredMaxRpm:F0}, σ={filteredRpmStdDev:F0})");
+                Log($"  原始: {rawSampleCount}样本, 过滤后: {filteredSampleCount}样本, 异常: {outlierCount} (raw min={rawMinRpm:F0}, max={rawMaxRpm:F0})");
                 Log($"  平均Duty: Raw={avgDutyRaw:F1} ({avgDutyPct:F1}%) (min raw={minDutyRaw:F0}, max raw={maxDutyRaw:F0})");
                 Log($"  温度: CPU {tempBefore.Remote}→{avgTemp:F0}°C");
             }
@@ -425,10 +448,10 @@ namespace X15FanControl
             // 写CSV
             using (var writer = new StreamWriter(csvPath, false, System.Text.Encoding.UTF8))
             {
-                writer.WriteLine("target_pct,avg_duty_pct,avg_duty_raw,min_duty_raw,max_duty_raw,min_duty_pct,max_duty_pct,avg_rpm,min_rpm,max_rpm,rpm_stddev,cpu_temp_start_c,cpu_temp_end_c,gpu_temp_start_c,gpu_temp_end_c,stable_samples,warm_rpm");
+                writer.WriteLine("target_pct,avg_duty_pct,avg_duty_raw,min_duty_raw,max_duty_raw,min_duty_pct,max_duty_pct,filtered_avg_rpm,median_rpm,filtered_min_rpm,filtered_max_rpm,filtered_rpm_stddev,raw_sample_count,filtered_sample_count,outlier_count,raw_min_rpm,raw_max_rpm,cpu_temp_start_c,cpu_temp_end_c,gpu_temp_start_c,gpu_temp_end_c,stable_samples,warm_rpm");
                 foreach (var rec in calibrationRecords)
                 {
-                    writer.WriteLine($"{rec.TargetPct},{rec.AvgDutyPct:F1},{rec.AvgDutyRaw:F1},{rec.MinDutyRaw},{rec.MaxDutyRaw},{rec.MinDutyPct:F1},{rec.MaxDutyPct:F1},{rec.AvgRpm:F0},{rec.MinRpm:F0},{rec.MaxRpm:F0},{rec.RpmStdDev:F0},{rec.CpuTempStart},{rec.CpuTempEnd:F0},{rec.GpuTempStart},{rec.GpuTempEnd:F0},{rec.StableSamples},{rec.WarmRpm}");
+                    writer.WriteLine($"{rec.TargetPct},{rec.AvgDutyPct:F1},{rec.AvgDutyRaw:F1},{rec.MinDutyRaw},{rec.MaxDutyRaw},{rec.MinDutyPct:F1},{rec.MaxDutyPct:F1},{rec.AvgRpm:F0},{rec.MedianRpm:F0},{rec.MinRpm:F0},{rec.MaxRpm:F0},{rec.RpmStdDev:F0},{rec.RawSampleCount},{rec.FilteredSampleCount},{rec.OutlierCount},{rec.RawMinRpm:F0},{rec.RawMaxRpm:F0},{rec.CpuTempStart},{rec.CpuTempEnd:F0},{rec.GpuTempStart},{rec.GpuTempEnd:F0},{rec.StableSamples},{rec.WarmRpm}");
                 }
             }
 
@@ -441,26 +464,29 @@ namespace X15FanControl
             if (!File.Exists(csvPath)) return "CSV文件不存在";
 
             var lines = File.ReadAllLines(csvPath).Skip(1).Where(l => !string.IsNullOrWhiteSpace(l)).ToList();
-            if (lines.Count < 2) return "数据不足";
+            if (lines.Count < 2) return "CSV数据行不足2行，无法进行阶跃分析";
 
             var records = lines.Select(l =>
             {
                 var parts = l.Split(',');
-                // CSV: target_pct(0), avg_duty_pct(1), avg_duty_raw(2), min_duty_raw(3), max_duty_raw(4),
-                //       min_duty_pct(5), max_duty_pct(6), avg_rpm(7), min_rpm(8), max_rpm(9), rpm_stddev(10), ...
+                // 新CSV: target_pct(0), avg_duty_pct(1), avg_duty_raw(2), min_duty_raw(3), max_duty_raw(4),
+                //       min_duty_pct(5), max_duty_pct(6), filtered_avg_rpm(7)
                 if (parts.Length < 8)
                     return null;
                 if (!int.TryParse(parts[0], System.Globalization.NumberStyles.Any,
                         System.Globalization.CultureInfo.InvariantCulture, out int target))
                     return null;
                 if (!double.TryParse(parts[7], System.Globalization.NumberStyles.Any,
-                        System.Globalization.CultureInfo.InvariantCulture, out double avgRpm))
+                        System.Globalization.CultureInfo.InvariantCulture, out double filteredAvgRpm))
                     return null;
-                // 过滤无效RPM记录
-                if (avgRpm <= 0)
+                // 使用filtered_avg_rpm进行阶跃分析
+                if (filteredAvgRpm <= 0)
                     return null;
-                return new { Target = target, AvgRpm = avgRpm };
+                return new { Target = target, AvgRpm = filteredAvgRpm };
             }).Where(r => r != null).ToList();
+
+            if (records.Count < 2)
+                return "有效RPM记录不足2条，无法进行阶跃分析";
 
             var sb = new System.Text.StringBuilder();
             sb.AppendLine("===== RPM阶跃分析 =====");
@@ -1135,16 +1161,92 @@ namespace X15FanControl
             public int MaxDutyRaw;
             public double MinDutyPct;
             public double MaxDutyPct;
-            public double AvgRpm;
-            public double MinRpm;
-            public double MaxRpm;
-            public double RpmStdDev;
+            public double AvgRpm;       // filtered average
+            public double MedianRpm;
+            public double MinRpm;       // filtered min
+            public double MaxRpm;       // filtered max
+            public double RpmStdDev;    // filtered stddev
+            public int RawSampleCount;
+            public int FilteredSampleCount;
+            public int OutlierCount;
+            public double RawMinRpm;
+            public double RawMaxRpm;
             public double CpuTempStart;
             public double CpuTempEnd;
             public double GpuTempStart;
             public double GpuTempEnd;
             public int StableSamples;
             public int WarmRpm;
+        }
+
+        // MAD-based RPM异常值过滤
+        // medianAbsoluteDeviationThreshold：偏离中位数超过阈值倍MAD的样本被视为异常值
+        private static FilteredMadData FilterRpmMad(List<int> samples, double madThreshold)
+        {
+            var result = new FilteredMadData();
+            if (samples == null || samples.Count == 0) return result;
+
+            result.RawCount = samples.Count;
+            var sorted = new List<int>(samples);
+            sorted.Sort();
+            double median = sorted.Count % 2 == 1
+                ? sorted[sorted.Count / 2]
+                : (sorted[sorted.Count / 2 - 1] + sorted[sorted.Count / 2]) / 2.0;
+            result.Median = median;
+
+            // 计算MAD (Median Absolute Deviation)
+            var absDevs = samples.Select(v => Math.Abs(v - median)).ToList();
+            absDevs.Sort();
+            double mad = absDevs.Count % 2 == 1
+                ? absDevs[absDevs.Count / 2]
+                : (absDevs[absDevs.Count / 2 - 1] + absDevs[absDevs.Count / 2]) / 2.0;
+            if (mad < 1) mad = 1; // 防止除以0
+
+            // 过滤异常值：|value - median| > madThreshold * MAD
+            var validSamples = new List<double>();
+            int outlierCount = 0;
+            double minVal = double.MaxValue, maxVal = double.MinValue;
+
+            foreach (int v in samples)
+            {
+                if (Math.Abs(v - median) > madThreshold * mad)
+                {
+                    outlierCount++;
+                }
+                else
+                {
+                    validSamples.Add(v);
+                    if (v < minVal) minVal = v;
+                    if (v > maxVal) maxVal = v;
+                }
+            }
+
+            result.OutlierCount = outlierCount;
+            result.FilteredCount = validSamples.Count;
+            result.FilteredMin = validSamples.Count > 0 ? minVal : 0;
+            result.FilteredMax = validSamples.Count > 0 ? maxVal : 0;
+
+            if (validSamples.Count > 0)
+            {
+                result.FilteredMean = validSamples.Average();
+                result.FilteredStdDev = validSamples.Count > 1
+                    ? Math.Sqrt(validSamples.Average(v => Math.Pow(v - result.FilteredMean, 2)))
+                    : 0;
+            }
+
+            return result;
+        }
+
+        private struct FilteredMadData
+        {
+            public int RawCount;
+            public int FilteredCount;
+            public int OutlierCount;
+            public double Median;
+            public double FilteredMean;
+            public double FilteredMin;
+            public double FilteredMax;
+            public double FilteredStdDev;
         }
     }
 }
