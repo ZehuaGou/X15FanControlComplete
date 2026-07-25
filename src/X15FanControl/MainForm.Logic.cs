@@ -219,31 +219,46 @@ namespace X15FanControl
         {
             if (_closing) return;
 
+            // 窗口隐藏或最小化时：不刷新UI，但后台控制循环继续
+            bool windowActive = Visible && ShowInTaskbar && WindowState != FormWindowState.Minimized;
+            if (!windowActive) return;
+
             // 只负责UI刷新：从后台控制循环取最新快照显示
             FanSnapshot snapshot;
             ControlDecision decision;
-            int chartInterval = Math.Max(1, _config.ChartSampleIntervalMs / Math.Max(1, _config.UiRefreshIntervalMs));
 
             lock (_latestLock)
             {
                 snapshot = _latestSnapshot;
                 decision = _latestDecision;
             }
+
+            // 校准模式：UI Timer负责驱动校准（从后台快照取数据）
+            if (_calibrationActive)
+            {
+                if (snapshot != null)
+                {
+                    CalibrationTick(snapshot);
+                    UpdateDashboard(snapshot, null);
+                }
+                return;
+            }
+
             if (snapshot == null) return;
 
-            // 标签始终更新
+            // 标签刷新
             UpdateDashboard(snapshot, decision);
 
-            // 图表降频：只有窗口可见时才添加，且按ChartSampleIntervalMs间隔
-            bool windowVisible = Visible && ShowInTaskbar && !_startMinimizedToTray;
-            if (windowVisible && _chartTickCounter % chartInterval == 0 && decision != null)
+            // 图表：时间戳间隔采样，不在UpdateDashboard中调用AddHistoryPoint
+            TimeSpan chartInterval = TimeSpan.FromMilliseconds(_config.ChartSampleIntervalMs);
+            if (decision != null && DateTime.UtcNow - _lastChartSampleUtc >= chartInterval)
             {
                 AddHistoryPoint("CPU 温度", snapshot.CpuTemperatureC);
                 AddHistoryPoint("GPU 温度", _gpuTelemetryReady ? snapshot.GpuTemperatureC : 0);
                 AddHistoryPoint("CPU 设定", decision.Cpu.AppliedPercent);
                 AddHistoryPoint("GPU 设定", decision.Gpu.AppliedPercent);
+                _lastChartSampleUtc = DateTime.UtcNow;
             }
-            _chartTickCounter++;
         }
 
         // 启动后台控制循环（替换UI线程中的EC读取和写入）
@@ -285,7 +300,10 @@ namespace X15FanControl
                     }
                     else
                     {
-                        decision = _engine.Update(snapshot);
+                        lock (_engineLock)
+                        {
+                            decision = _engine.Update(snapshot);
+                        }
 
                         if (decision.RequestAutoFallback)
                         {
@@ -791,10 +809,7 @@ namespace X15FanControl
             _cpuTargetLabel.Text = decision.Cpu.AppliedPercent.ToString("0.0") + "%";
             _gpuTargetLabel.Text = decision.Gpu.AppliedPercent.ToString("0.0") + "%";
 
-            AddHistoryPoint("CPU 温度", snapshot.CpuTemperatureC);
-            AddHistoryPoint("GPU 温度", _gpuTelemetryReady ? snapshot.GpuTemperatureC : 0);
-            AddHistoryPoint("CPU 设定", decision.Cpu.AppliedPercent);
-            AddHistoryPoint("GPU 设定", decision.Gpu.AppliedPercent);
+            // 图表点已由UI Timer独立添加，此处不再调用AddHistoryPoint
         }
 
         private static string GetControlStateText(ControlState state, double downHoldRemaining)
@@ -1215,30 +1230,48 @@ namespace X15FanControl
                 return;
             }
 
-            // 真正退出：完整清理
+            // 真正退出：完整清理，必须先停止控制循环再恢复Auto
             _closing = true;
             _mainTimer.Stop();
-            _logCts?.Cancel();
 
+            // 第1步：停止后台控制循环
+            AppendLog("正在停止控制循环...");
+            _controlCts?.Cancel();
+            try { _controlTask?.Wait(2000); } catch { }
+            AppendLog("Control loop stopped");
+
+            // 第2步：使验证任务失效
             InvalidateVerificationTasks();
-            StopCalibration("应用程序关闭");
-            RestoreAuto("应用程序关闭");
-            StopWatchdog();
-            _heartbeat?.WriteStop();
-            _csvLogger?.Dispose();
-            _csvLogger = null;
 
-            // Flush remaining log queue
+            // 第3步：恢复Auto（此时无后台写入）
+            AppendLog("RestoreAuto begin");
+            try { StopCalibration("应用程序关闭"); } catch { }
+            try { RestoreAuto("应用程序关闭"); } catch { }
+            AppendLog("RestoreAuto end");
+
+            // 第4步：停止附加服务
+            try { StopWatchdog(); } catch { }
+            try { _heartbeat?.WriteStop(); } catch { }
+
+            // 第5步：停止GPU遥测
             _logCts?.Cancel();
-            try { _logFlushTask?.Wait(2000); } catch { }
-            FlushLogQueue();
-
             if (_gpuTelemetry != null)
             {
                 _gpuTelemetry.Dispose();
                 _gpuTelemetry = null;
             }
+            _csvLogger?.Dispose();
+            _csvLogger = null;
+
+            // 第6步：Flush日志
+            try { _logFlushTask?.Wait(2000); } catch { }
+            FlushLogQueue();
+
+            // 第7步：释放EC
+            AppendLog("EC disposed");
             DisposeEc();
+
+            // 第8步：释放NotifyIcon
             if (_notifyIcon != null)
             {
                 _notifyIcon.Visible = false;

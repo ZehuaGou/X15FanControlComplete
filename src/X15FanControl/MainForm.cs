@@ -68,7 +68,10 @@ namespace X15FanControl
         private int _currentLogLines;
 
         // Chart downsampling
-        private int _chartTickCounter;
+        private DateTime _lastChartSampleUtc = DateTime.MinValue;
+
+        // Thread safety
+        private readonly object _engineLock = new object();
 
         // Sensor stall detection (CPU only)
         private int _cpuTempStallCount;

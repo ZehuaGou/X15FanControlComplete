@@ -8,6 +8,7 @@ namespace X15FanCore.Models
     {
         public AppConfig()
         {
+            ConfigVersion = 2;
             ActiveProfileName = "静音稳定－平衡";
             StartupMode = RunMode.ReadOnly;
             PollIntervalMs = 500;
@@ -25,6 +26,9 @@ namespace X15FanCore.Models
             ChartSampleIntervalMs = 1000;
             MaxUiLogLines = 1500;
         }
+
+        [DataMember(Order = 0)]
+        public int ConfigVersion { get; set; }
 
         [DataMember(Order = 1)]
         public string ActiveProfileName { get; set; }

@@ -37,6 +37,9 @@ namespace X15FanCore.Control
                     // 合并默认配置中缺失的配置（用户升级后自动获得新配置）
                     MergeDefaultProfiles(config, DefaultProfiles.CreateConfig());
 
+                    // 规范化新增字段（旧JSON反序列化后可能缺失）
+                    NormalizeConfig(config);
+
                     return config;
                 }
             }
@@ -86,6 +89,24 @@ namespace X15FanCore.Control
                 File.Move(temporaryPath, ConfigPath);
             }
         }
+
+        // 规范化配置文件：为旧版本config.json中缺失的字段设置安全默认值
+        private static void NormalizeConfig(AppConfig config)
+        {
+            if (config.ConfigVersion < 2)
+            {
+                // 从版本1升级：桌面体验字段可能缺失
+                config.StartMinimizedToTray = true;
+                config.DetailedVerificationLogging = false;
+                config.AutoEnterActiveOnStartup = false;
+                config.StartWithWindows = false;
+                config.UiRefreshIntervalMs = 500;
+                config.ChartSampleIntervalMs = 1000;
+                config.MaxUiLogLines = 1500;
+                config.ConfigVersion = 2;
+            }
+        }
+
         // 将默认配置中有但用户配置中没有的配置追加进去，方便用户升级后使用新配置
         private static void MergeDefaultProfiles(AppConfig userConfig, AppConfig defaultConfig)
         {
