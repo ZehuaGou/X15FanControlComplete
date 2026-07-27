@@ -129,6 +129,11 @@ namespace X15FanCore.Control
             }
 
             // 对异常值进行规范化（无论版本）
+            if (!Enum.IsDefined(typeof(RunMode), config.StartupMode))
+            {
+                config.StartupMode = RunMode.ReadOnly;
+                changed = true;
+            }
             if (config.UiRefreshIntervalMs <= 0) { config.UiRefreshIntervalMs = 500; changed = true; }
             if (config.ChartSampleIntervalMs <= 0) { config.ChartSampleIntervalMs = 1000; changed = true; }
             if (config.MaxUiLogLines <= 0) { config.MaxUiLogLines = 1500; changed = true; }

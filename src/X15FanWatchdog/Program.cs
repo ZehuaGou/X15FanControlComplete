@@ -9,6 +9,8 @@ namespace X15FanWatchdog
 {
     internal static class Program
     {
+        private const double HeartbeatTimeoutSeconds = 12;
+
         private static int Main(string[] args)
         {
             try
@@ -29,7 +31,11 @@ namespace X15FanWatchdog
                     bool parentAlive = IsProcessAlive(options.ParentProcessId);
                     DateTime heartbeatTime = File.Exists(options.HeartbeatPath) ? File.GetLastWriteTimeUtc(options.HeartbeatPath) : DateTime.MinValue;
                     bool startupGrace = (DateTime.UtcNow - startUtc).TotalSeconds < 10;
-                    bool stale = heartbeatTime == DateTime.MinValue || (DateTime.UtcNow - heartbeatTime).TotalSeconds > 6;
+                    // EC verification can legitimately hold the control loop for
+                    // a little over five seconds. Keep enough margin to avoid a
+                    // false fail-safe while still recovering quickly from a hang.
+                    bool stale = heartbeatTime == DateTime.MinValue ||
+                        (DateTime.UtcNow - heartbeatTime).TotalSeconds > HeartbeatTimeoutSeconds;
 
                     if (!startupGrace && (!parentAlive || stale))
                     {

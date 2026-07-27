@@ -5,6 +5,7 @@
     <UseWindowsForms>true</UseWindowsForms>
     <AssemblyName>X15FanControl</AssemblyName>
     <RootNamespace>X15FanControl</RootNamespace>
+    <ApplicationIcon>Assets\x15-fan-control.ico</ApplicationIcon>
     <ApplicationManifest>app.manifest</ApplicationManifest>
     <StartupObject>X15FanControl.Program</StartupObject>
   </PropertyGroup>

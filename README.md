@@ -83,6 +83,12 @@ The application writes to:
 
 This includes `config.json`, heartbeat state, CSV logs, application logs, and watchdog logs.
 
+The profile selection is saved immediately. A run mode becomes the startup
+preference after **Apply Mode** succeeds and remains selected until Apply Mode is
+used again. A saved Active preference is restored only after the EC, process
+conflict, and GPU telemetry safety checks pass. Temporary safety fallbacks do
+not overwrite the saved preference.
+
 ## Default profiles
 
 All values are editable in the Profiles & curves tab.

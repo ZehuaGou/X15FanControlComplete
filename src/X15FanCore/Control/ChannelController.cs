@@ -110,7 +110,8 @@ namespace X15FanCore.Control
             decision.SlowTemperatureC = _filter.SlowEma;
             decision.ControlTemperatureC = controlTemperature;
 
-            if (!_initialized)
+            bool firstValidUpdate = !_initialized;
+            if (firstValidUpdate)
             {
                 _applied = Clamp(currentDutyPercent, 0, 100);
                 _acceptedTarget = _applied;
@@ -173,7 +174,19 @@ namespace X15FanCore.Control
             }
             else
             {
-                UpdateAcceptedTarget(rawTarget, controlTemperature, timestampUtc);
+                if (firstValidUpdate)
+                {
+                    // The duty observed while EC automatic control was active is
+                    // not a target previously accepted by this controller. Using
+                    // it as one applies hysteresis to an unrelated starting value
+                    // and can pin a high startup duty indefinitely.
+                    _acceptedTarget = rawTarget;
+                    _pendingDownSinceUtc = null;
+                }
+                else
+                {
+                    UpdateAcceptedTarget(rawTarget, controlTemperature, timestampUtc);
+                }
                 RampAppliedTarget(Math.Max(0.01, elapsedSeconds), emergencyBoostRate);
             }
 

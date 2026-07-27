@@ -155,6 +155,14 @@ namespace X15FanControl
             _startMinimizedToTray = startMinimized;
             _isAutoStart = isAutoStart;
             Text = "X15 风扇控制 — 静音稳定控制器";
+            try
+            {
+                Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
+            }
+            catch
+            {
+                Icon = SystemIcons.Application;
+            }
             StartPosition = FormStartPosition.CenterScreen;
             MinimumSize = new Size(1080, 720);
             Size = new Size(1250, 820);
@@ -260,8 +268,11 @@ namespace X15FanControl
             // Start background control loop (replaces UI timer control work)
             StartBackgroundControl();
 
-            // Handle auto-Active on --autostart
-            if (_isAutoStart && _config.AutoEnterActiveOnStartup)
+            // Active must wait until EC and telemetry initialization has completed.
+            // StartupMode is the current preference; the second condition preserves
+            // compatibility with configurations created by older builds.
+            if (_config.StartupMode == RunMode.Active ||
+                (_isAutoStart && _config.AutoEnterActiveOnStartup))
             {
                 TryAutoActive();
             }
@@ -417,7 +428,7 @@ namespace X15FanControl
             _notifyIcon = new NotifyIcon
             {
                 Text = "X15 风扇控制",
-                Icon = SystemIcons.Application,
+                Icon = Icon ?? SystemIcons.Application,
                 Visible = true,
                 ContextMenuStrip = menu
             };

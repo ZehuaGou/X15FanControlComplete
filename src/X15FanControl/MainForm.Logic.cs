@@ -149,7 +149,20 @@ namespace X15FanControl
                 return;
             }
 
-            SetRunMode((RunMode)_modeCombo.SelectedItem, "User request");
+            RunMode requestedMode = (RunMode)_modeCombo.SelectedItem;
+            SetRunMode(requestedMode, "User request");
+
+            // Only a successfully applied user choice becomes the startup preference.
+            // Safety fallbacks use SetRunMode directly, so they never overwrite it.
+            if (_runMode == requestedMode)
+            {
+                _config.StartupMode = requestedMode;
+                _config.AutoEnterActiveOnStartup = requestedMode == RunMode.Active;
+                if (SaveConfig())
+                {
+                    AppendLog("已保存启动模式：" + requestedMode + "。");
+                }
+            }
         }
 
         private void SetRunMode(RunMode requestedMode, string reason)
@@ -189,18 +202,9 @@ namespace X15FanControl
                                 MessageBoxIcon.Warning);
                             requestedMode = RunMode.ReadOnly;
                         }
-                        else
-                        {
-                            DialogResult confirmation = MessageBox.Show(
-                                "活动模式将风扇占空比写入嵌入式控制器。\r\n\r\n" +
-                                "无效传感器、退出、休眠或异常时会恢复自动控制。\r\n\r\n是否启动活动模式？",
-                                "启用硬件控制",
-                                MessageBoxButtons.YesNo,
-                                MessageBoxIcon.Warning,
-                                MessageBoxDefaultButton.Button2);
-                            if (confirmation != DialogResult.Yes)
-                                requestedMode = RunMode.ReadOnly;
-                        }
+                        // The explicit Active selection is the user's confirmation.
+                        // EC availability, controller conflicts and telemetry validity
+                        // above remain mandatory safety gates.
                     }
                 }
             }
@@ -337,6 +341,18 @@ namespace X15FanControl
 
                         if (_runMode == RunMode.Active)
                         {
+                            if (HasWatchdogExitedUnexpectedly())
+                            {
+                                BeginInvoke(new Action(() =>
+                                {
+                                    if (_runMode != RunMode.Active) return;
+                                    RestoreAuto("看门狗异常退出");
+                                    SetRunMode(RunMode.ReadOnly, "看门狗故障保护");
+                                }));
+                                try { await Task.Delay(500, token); } catch { break; }
+                                continue;
+                            }
+
                             // 执行WriteDecision前再次确认非退出状态
                             if (_closing || token.IsCancellationRequested) break;
                             WriteDecision(decision, now);
@@ -418,7 +434,7 @@ namespace X15FanControl
             FlashModeBadge();
             _heartbeat?.WriteActive(Process.GetCurrentProcess().Id);
             StartWatchdog();
-            AppendLog("自动Active模式已启用（--autostart）");
+            AppendLog("已恢复用户保存的 Active 启动模式。");
         }
 
         private void DetectSensorStalls(FanSnapshot snapshot)
@@ -1101,6 +1117,23 @@ namespace X15FanControl
             AppendLog("看门狗已启动，PID " + (_watchdogProcess == null ? 0 : _watchdogProcess.Id) + "。");
         }
 
+        private bool HasWatchdogExitedUnexpectedly()
+        {
+            if (!_config.LaunchWatchdogInActiveMode || _watchdogProcess == null)
+            {
+                return false;
+            }
+
+            try
+            {
+                return _watchdogProcess.HasExited;
+            }
+            catch
+            {
+                return true;
+            }
+        }
+
         private void StopWatchdog()
         {
             try
@@ -1127,15 +1160,17 @@ namespace X15FanControl
             }
         }
 
-        private void SaveConfig()
+        private bool SaveConfig()
         {
             try
             {
                 _configStore?.Save(_config);
+                return true;
             }
             catch (Exception exception)
             {
                 AppendLog("保存配置失败：" + exception.Message);
+                return false;
             }
         }
 
