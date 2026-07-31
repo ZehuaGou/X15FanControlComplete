@@ -11,6 +11,33 @@ namespace X15FanControl
 {
     public partial class MainForm
     {
+        private static bool TryGetTierForDchuPower(int pl1, int pl2, uint timeSeconds, out AdaptivePowerTier tier)
+        {
+            if (timeSeconds == 28 && pl1 == 25 && pl2 == 35)
+            {
+                tier = AdaptivePowerTier.Quiet;
+                return true;
+            }
+            if (timeSeconds == 28 && pl1 == 30 && pl2 == 45)
+            {
+                tier = AdaptivePowerTier.Daily;
+                return true;
+            }
+            if (timeSeconds == 28 && pl1 == 38 && pl2 == 55)
+            {
+                tier = AdaptivePowerTier.Code;
+                return true;
+            }
+            if (timeSeconds == 28 && pl1 == 55 && pl2 == 69)
+            {
+                tier = AdaptivePowerTier.Heavy;
+                return true;
+            }
+
+            tier = AdaptivePowerTier.Daily;
+            return false;
+        }
+
         private void UpdateAdaptivePowerPolicy(FanSnapshot snapshot, DateTime nowUtc)
         {
             if (_config == null || _runMode != RunMode.Active ||
@@ -27,6 +54,7 @@ namespace X15FanControl
                     CpuUtilizationPercent = snapshot.CpuUtilizationPercent,
                     CpuPerformancePercent = snapshot.CpuPerformancePercent,
                     GpuUtilizationPercent = snapshot.GpuTelemetryAvailable ? snapshot.GpuTelemetryUtilization : 0,
+                    GpuTelemetryAvailable = snapshot.GpuTelemetryAvailable,
                     CpuTemperatureC = snapshot.CpuTemperatureC,
                     GpuTemperatureC = snapshot.GpuTemperatureC
                 });
@@ -154,20 +182,68 @@ namespace X15FanControl
                 Task<string> outputTask = bridge.StandardOutput.ReadToEndAsync();
                 Task<string> errorTask = bridge.StandardError.ReadToEndAsync();
                 Task waitTask = Task.Run(() => bridge.WaitForExit());
-                if (await Task.WhenAny(waitTask, Task.Delay(12000, token)) != waitTask)
+                if (await Task.WhenAny(waitTask, Task.Delay(12000, token)).ConfigureAwait(false) != waitTask)
                 {
                     try { bridge.Kill(); } catch { }
                     AppendLog("固定策略功耗：Control Center 写入超过12秒，已终止");
                     return false;
                 }
 
-                string output = await outputTask;
-                string error = await errorTask;
+                string output = await outputTask.ConfigureAwait(false);
+                string error = await errorTask.ConfigureAwait(false);
                 foreach (string line in output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
                     AppendLog("固定策略 XTU：" + line);
                 foreach (string line in error.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
                     AppendLog("固定策略 XTU 错误：" + line);
                 return bridge.ExitCode == 0 && output.IndexOf("APPLIED=True", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+        }
+
+        private async Task<bool> RestoreOriginalDchuPowerAsync(
+            string bridgePath,
+            int pl1,
+            int pl2,
+            uint timeSeconds)
+        {
+            using (Process bridge = new Process
+            {
+                StartInfo = new ProcessStartInfo
+                {
+                    FileName = bridgePath,
+                    Arguments = "--restore-cpu-power " +
+                                 pl1.ToString(CultureInfo.InvariantCulture) + " " +
+                                 pl2.ToString(CultureInfo.InvariantCulture) + " " +
+                                 timeSeconds.ToString(CultureInfo.InvariantCulture),
+                    WorkingDirectory = Path.GetDirectoryName(bridgePath),
+                    UseShellExecute = false,
+                    CreateNoWindow = true,
+                    RedirectStandardOutput = true,
+                    RedirectStandardError = true,
+                    StandardOutputEncoding = Encoding.UTF8,
+                    StandardErrorEncoding = Encoding.UTF8
+                }
+            })
+            {
+                if (!bridge.Start())
+                    return false;
+
+                Task<string> outputTask = bridge.StandardOutput.ReadToEndAsync();
+                Task<string> errorTask = bridge.StandardError.ReadToEndAsync();
+                Task waitTask = Task.Run(() => bridge.WaitForExit());
+                if (await Task.WhenAny(waitTask, Task.Delay(6000, System.Threading.CancellationToken.None)).ConfigureAwait(false) != waitTask)
+                {
+                    try { bridge.Kill(); } catch { }
+                    AppendLog("恢复原始 DCHU：写入超过12秒，已终止");
+                    return false;
+                }
+
+                string output = await outputTask.ConfigureAwait(false);
+                string error = await errorTask.ConfigureAwait(false);
+                foreach (string line in output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                    AppendLog("恢复原始 DCHU：" + line);
+                foreach (string line in error.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                    AppendLog("恢复原始 DCHU 错误：" + line);
+                return bridge.ExitCode == 0 && output.IndexOf("RESTORED=True", StringComparison.OrdinalIgnoreCase) >= 0;
             }
         }
 
@@ -182,21 +258,55 @@ namespace X15FanControl
             }
         }
 
-        private void RestoreAdaptivePowerPolicy()
+        private async Task RestoreAdaptivePowerPolicyAsync()
         {
             _adaptiveApplyCts?.Cancel();
             Task applyTask = _adaptiveApplyTask;
             if (applyTask != null && !applyTask.IsCompleted)
             {
-                try { applyTask.Wait(3000); } catch { }
+                try
+                {
+                    await Task.WhenAny(applyTask, Task.Delay(3000)).ConfigureAwait(false);
+                }
+                catch { }
             }
             if (_adaptivePolicyCaptured && _adaptiveProcessorPolicy != null && _adaptivePolicySnapshot != null)
             {
                 string error = null;
-                bool restored = Task.Run(() => _adaptiveProcessorPolicy.Restore(_adaptivePolicySnapshot, out error)).GetAwaiter().GetResult();
-                AppendLog(restored
-                    ? "固定策略功耗：已恢复原 Windows CPU 性能上限=" + _adaptivePolicySnapshot.OriginalAcMaximumPercent + "%"
-                    : "固定策略功耗：恢复 Windows CPU 性能上限失败：" + error);
+                Task<bool> restoreTask = Task.Run(() => _adaptiveProcessorPolicy.Restore(_adaptivePolicySnapshot, out error));
+                try
+                {
+                    if (await Task.WhenAny(restoreTask, Task.Delay(6000)).ConfigureAwait(false) == restoreTask)
+                    {
+                        bool restored = await restoreTask.ConfigureAwait(false);
+                        AppendLog(restored
+                            ? "固定策略功耗：已恢复原 Windows CPU 性能上限=" + _adaptivePolicySnapshot.OriginalAcMaximumPercent + "%"
+                            : "固定策略功耗：恢复 Windows CPU 性能上限失败：" + error);
+                    }
+                    else
+                    {
+                        AppendLog("固定策略功耗：恢复 Windows CPU 性能上限超时，继续退出清理。");
+                    }
+                }
+                catch (Exception exception)
+                {
+                    AppendLog("固定策略功耗：恢复 Windows CPU 性能上限异常：" + exception.Message);
+                }
+            }
+            if (_adaptiveDchuOriginalCaptured)
+            {
+                string bridgePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "X15XtuBridge.exe");
+                if (File.Exists(bridgePath))
+                {
+                    bool restored = await RestoreOriginalDchuPowerAsync(
+                        bridgePath,
+                        _adaptiveDchuOriginalPl1,
+                        _adaptiveDchuOriginalPl2,
+                        _adaptiveDchuOriginalTimeSeconds).ConfigureAwait(false);
+                    AppendLog(restored
+                        ? "固定策略功耗：已恢复启动前 DCHU 功耗。"
+                        : "固定策略功耗：恢复启动前 DCHU 功耗失败，请检查日志。");
+                }
             }
             _adaptivePolicyCaptured = false;
             _adaptiveAppliedTier = (AdaptivePowerTier)(-1);
@@ -205,6 +315,18 @@ namespace X15FanControl
             _adaptiveXtuConfirmed = false;
             _adaptiveBackendName = "未应用";
             _adaptiveLastReason = "当前未进入 Active，策略未写入";
+        }
+
+        private void RestoreAdaptivePowerPolicy()
+        {
+            try
+            {
+                RestoreAdaptivePowerPolicyAsync().GetAwaiter().GetResult();
+            }
+            catch (Exception exception)
+            {
+                AppendLog("恢复自适应功耗方案失败：" + exception.Message);
+            }
         }
     }
 }

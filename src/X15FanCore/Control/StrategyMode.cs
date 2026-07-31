@@ -27,6 +27,20 @@ namespace X15FanCore.Control
             }
         }
 
+        // ActiveProfileName is a legacy persistence field whose values are
+        // profile keys, not the user-facing labels returned by GetName().
+        public static string GetProfileName(StrategyMode mode)
+        {
+            switch (mode)
+            {
+                case StrategyMode.Quiet: return "安静";
+                case StrategyMode.Daily: return "日常";
+                case StrategyMode.Code: return "代码";
+                case StrategyMode.Heavy: return "重负载";
+                default: return "自动";
+            }
+        }
+
         public static bool TryParse(string value, out StrategyMode mode)
         {
             string text = value ?? string.Empty;

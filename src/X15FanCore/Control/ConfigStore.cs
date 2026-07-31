@@ -114,6 +114,7 @@ namespace X15FanCore.Control
         private static bool NormalizeConfig(AppConfig config)
         {
             bool changed = false;
+            bool hasExplicitStrategyMode = config.ConfigVersion >= 2;
 
             if (config.ConfigVersion < 2)
             {
@@ -146,7 +147,7 @@ namespace X15FanCore.Control
             config.AdaptivePower.Normalize();
 
             StrategyMode parsedMode;
-            if (StrategyModeInfo.TryParse(config.ActiveProfileName, out parsedMode))
+            if (!hasExplicitStrategyMode && StrategyModeInfo.TryParse(config.ActiveProfileName, out parsedMode))
             {
                 if (config.StrategyMode != parsedMode)
                 {
@@ -156,8 +157,20 @@ namespace X15FanCore.Control
             }
             else if (!System.Enum.IsDefined(typeof(StrategyMode), config.StrategyMode))
             {
-                config.StrategyMode = StrategyMode.Auto;
+                config.StrategyMode = StrategyModeInfo.TryParse(config.ActiveProfileName, out parsedMode)
+                    ? parsedMode
+                    : StrategyMode.Auto;
                 changed = true;
+            }
+
+            if (hasExplicitStrategyMode)
+            {
+                string canonicalProfileName = StrategyModeInfo.GetProfileName(config.StrategyMode);
+                if (!string.Equals(config.ActiveProfileName, canonicalProfileName, StringComparison.Ordinal))
+                {
+                    config.ActiveProfileName = canonicalProfileName;
+                    changed = true;
+                }
             }
 
             return changed;
@@ -172,12 +185,17 @@ namespace X15FanCore.Control
             bool changed = false;
             Dictionary<string, FanProfile> selectedBuiltIns = new Dictionary<string, FanProfile>(StringComparer.OrdinalIgnoreCase);
             List<FanProfile> retainedProfiles = new List<FanProfile>();
-            string activeBuiltInKey = null;
+            string activeBuiltInKey = userConfig.ConfigVersion >= 2 &&
+                                      Enum.IsDefined(typeof(StrategyMode), userConfig.StrategyMode)
+                ? GetBuiltInKeyForStrategy(userConfig.StrategyMode)
+                : null;
+            bool strategySelectionIsAuthoritative = activeBuiltInKey != null;
 
             foreach (FanProfile userProfile in userConfig.Profiles)
             {
                 string builtInKey = GetBuiltInKey(userProfile);
-                if (string.Equals(userProfile?.Name, userConfig.ActiveProfileName, StringComparison.OrdinalIgnoreCase))
+                if (!strategySelectionIsAuthoritative &&
+                    string.Equals(userProfile?.Name, userConfig.ActiveProfileName, StringComparison.OrdinalIgnoreCase))
                     activeBuiltInKey = builtInKey;
 
                 if (builtInKey == null)
@@ -294,7 +312,13 @@ namespace X15FanCore.Control
                 HasPoint(profile.Cpu, 50, 15) && HasPoint(profile.Cpu, 80, 54) && HasPoint(profile.Gpu, 70, 42))
                 return "Code";
 
-            if (name.IndexOf("Quiet", StringComparison.OrdinalIgnoreCase) >= 0 ||
+            if (name.Equals("日常", StringComparison.OrdinalIgnoreCase) ||
+                name.IndexOf("Daily", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                HasPoint(profile.Cpu, 70, 45) && HasPoint(profile.Cpu, 80, 58) && HasPoint(profile.Gpu, 70, 35))
+                return "Daily";
+
+            if (name.Equals("安静", StringComparison.OrdinalIgnoreCase) ||
+                name.IndexOf("Quiet", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 name.IndexOf("Silent", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 name.IndexOf("静音", StringComparison.OrdinalIgnoreCase) >= 0 ||
                 HasPoint(profile.Cpu, 65, 35) && HasPoint(profile.Cpu, 75, 55) && HasPoint(profile.Cpu, 95, 100))
@@ -312,6 +336,18 @@ namespace X15FanCore.Control
                 return "Brz Legacy";
 
             return null;
+        }
+
+        private static string GetBuiltInKeyForStrategy(StrategyMode mode)
+        {
+            switch (mode)
+            {
+                case StrategyMode.Quiet: return "Quiet";
+                case StrategyMode.Daily: return "Daily";
+                case StrategyMode.Code: return "Code";
+                case StrategyMode.Heavy: return "Heavy";
+                default: return "Auto";
+            }
         }
 
         private static bool HasPoint(FanChannelProfile channel, double temperature, double percent)

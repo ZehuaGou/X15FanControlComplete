@@ -111,14 +111,21 @@ namespace X15FanCore.Control
                         return string.Empty;
                     }
 
-                    string output = process.StandardOutput.ReadToEnd();
-                    string stderr = process.StandardError.ReadToEnd();
+                    // Drain both redirected streams asynchronously before waiting
+                    // so a stuck powercfg process cannot block the UI indefinitely
+                    // on a full stdout/stderr pipe.
+                    System.Threading.Tasks.Task<string> outputTask = process.StandardOutput.ReadToEndAsync();
+                    System.Threading.Tasks.Task<string> errorTask = process.StandardError.ReadToEndAsync();
                     if (!process.WaitForExit(5000))
                     {
                         try { process.Kill(); } catch { }
+                        try { process.WaitForExit(1000); } catch { }
                         error = "powercfg.exe 超时。";
-                        return output;
+                        return string.Empty;
                     }
+
+                    string output = outputTask.GetAwaiter().GetResult();
+                    string stderr = errorTask.GetAwaiter().GetResult();
 
                     if (process.ExitCode != 0)
                         error = FirstNonEmpty(stderr, output, "powercfg.exe 返回码=" + process.ExitCode);

@@ -20,6 +20,7 @@ namespace X15FanCore.Models
         EmergencyStage2 = 2,
         InvalidSensor = 3,
         Initializing = 4,
-        EmergencyStage3 = 5
+        EmergencyStage3 = 5,
+        RpmSafety = 6
     }
 }

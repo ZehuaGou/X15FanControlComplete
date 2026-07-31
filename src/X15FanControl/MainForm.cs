@@ -70,6 +70,9 @@ namespace X15FanControl
         private long _lastEcActivityUtcTicks;
         private int _lastCpuRpm;
         private int _lastGpuRpm;
+        private int _cpuLowRpmSafetySamples;
+        private bool _cpuLowRpmSafetyActive;
+        private DateTime _lastCpuLowRpmSafetyWriteUtc = DateTime.MinValue;
         private int _cpuZeroDutyReadCount;
         private int _gpuZeroDutyReadCount;
         private int _ecFaulted;
@@ -116,6 +119,10 @@ namespace X15FanControl
         private AdaptivePowerTier _adaptiveAppliedTier = (AdaptivePowerTier)(-1);
         private AdaptivePowerTier _adaptiveCurrentTier = AdaptivePowerTier.Daily;
         private bool _adaptiveXtuConfirmed;
+        private bool _adaptiveDchuOriginalCaptured;
+        private int _adaptiveDchuOriginalPl1;
+        private int _adaptiveDchuOriginalPl2;
+        private uint _adaptiveDchuOriginalTimeSeconds;
         private bool _adaptivePowerApplying;
         private bool _adaptivePolicyCaptured;
         private string _adaptiveLastReason = "等待硬件初始化";
@@ -508,10 +515,46 @@ namespace X15FanControl
                 foreach (string line in output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
                 {
                     AppendLog("Intel XTU 桥接：" + line);
+                    const string pl1Prefix = "DCHU_PL1_WATTS=";
+                    const string pl2Prefix = "DCHU_PL2_WATTS=";
+                    const string timePrefix = "DCHU_TIME_SECONDS=";
+                    int value;
+                    uint timeValue;
+                    if (line.StartsWith(pl1Prefix, StringComparison.OrdinalIgnoreCase) &&
+                        int.TryParse(line.Substring(pl1Prefix.Length), out value))
+                        _adaptiveDchuOriginalPl1 = value;
+                    if (line.StartsWith(pl2Prefix, StringComparison.OrdinalIgnoreCase) &&
+                        int.TryParse(line.Substring(pl2Prefix.Length), out value))
+                        _adaptiveDchuOriginalPl2 = value;
+                    if (line.StartsWith(timePrefix, StringComparison.OrdinalIgnoreCase) &&
+                        uint.TryParse(line.Substring(timePrefix.Length), out timeValue))
+                        _adaptiveDchuOriginalTimeSeconds = timeValue;
                 }
                 foreach (string line in error.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
                 {
                     AppendLog("Intel XTU 桥接错误：" + line);
+                }
+                if (output.IndexOf("DCHU_AVAILABLE=True", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                    _adaptiveDchuOriginalPl1 >= 5 &&
+                    _adaptiveDchuOriginalPl2 >= _adaptiveDchuOriginalPl1 &&
+                    _adaptiveDchuOriginalTimeSeconds > 0)
+                {
+                    _adaptiveDchuOriginalCaptured = true;
+                    AppendLog("固定策略功耗：已记录启动前 DCHU=" +
+                              _adaptiveDchuOriginalPl1 + "/" + _adaptiveDchuOriginalPl2 + "W，" +
+                              _adaptiveDchuOriginalTimeSeconds + "秒；退出时恢复。");
+
+                    AdaptivePowerTier detectedTier;
+                    if (_config != null && _config.StrategyMode == StrategyMode.Auto &&
+                        TryGetTierForDchuPower(_adaptiveDchuOriginalPl1, _adaptiveDchuOriginalPl2,
+                            _adaptiveDchuOriginalTimeSeconds, out detectedTier))
+                    {
+                        _adaptiveCurrentTier = detectedTier;
+                        _adaptiveAppliedTier = (AdaptivePowerTier)(-1);
+                        _adaptivePowerTierController?.ForceTier(detectedTier, "自动策略从当前 DCHU 档位开始");
+                        ApplyFixedFanProfile(detectedTier);
+                        AppendLog("自动策略起始档位：根据启动前 DCHU 识别为" + GetCurrentStrategyLevelName(StrategyMode.Auto, detectedTier) + "。");
+                    }
                 }
                 AppendLog("Intel XTU 桥接退出码：" + bridge.ExitCode + "（当前仅探测，不写入功耗）");
             }

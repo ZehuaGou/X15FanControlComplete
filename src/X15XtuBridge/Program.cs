@@ -75,6 +75,38 @@ namespace X15XtuBridge
                     return applied.Applied ? 0 : 2;
                 }
 
+                if (args.Length > 0 && string.Equals(args[0], "--restore-cpu-power", StringComparison.OrdinalIgnoreCase))
+                {
+                    if (args.Length != 4)
+                    {
+                        Write("ERROR", "用法：--restore-cpu-power <PL1瓦> <PL2瓦> <时间秒>");
+                        return 1;
+                    }
+
+                    decimal pl1;
+                    decimal pl2;
+                    uint timeSeconds;
+                    if (!decimal.TryParse(args[1], NumberStyles.Number, CultureInfo.InvariantCulture, out pl1) ||
+                        !decimal.TryParse(args[2], NumberStyles.Number, CultureInfo.InvariantCulture, out pl2) ||
+                        !uint.TryParse(args[3], NumberStyles.Integer, CultureInfo.InvariantCulture, out timeSeconds) ||
+                        !IsRestorablePowerState(pl1, pl2, timeSeconds))
+                    {
+                        Write("ERROR", "原始功耗状态超出恢复安全范围。");
+                        return 3;
+                    }
+
+                    ControlCenterDchuPowerApplyResult restored = new ControlCenterDchuPowerBackend()
+                        .ApplyCpuPowerLimits(pl1, pl2, timeSeconds);
+                    Write("BACKEND", "ControlCenter-DCHU");
+                    Write("RESTORED", restored.Applied);
+                    Write("RESTORE_PL1_WATTS", pl1.ToString(CultureInfo.InvariantCulture));
+                    Write("RESTORE_PL2_WATTS", pl2.ToString(CultureInfo.InvariantCulture));
+                    Write("RESTORE_TIME_SECONDS", timeSeconds);
+                    if (!string.IsNullOrEmpty(restored.Error))
+                        Write("DCHU_ERROR", restored.Error);
+                    return restored.Applied ? 0 : 2;
+                }
+
                 ControlCenterDchuProbeResult dchuProbe = new ControlCenterDchuPowerBackend().ProbePowerLimits();
                 Write("DCHU_AVAILABLE", dchuProbe.Available);
                 Write("DCHU_SDK_DIRECTORY", dchuProbe.SdkDirectory);
@@ -171,6 +203,11 @@ namespace X15XtuBridge
                  (pl1 == 30m && pl2 == 45m) ||
                  (pl1 == 38m && pl2 == 55m) ||
                  (pl1 == 55m && pl2 == 69m));
+        }
+
+        private static bool IsRestorablePowerState(decimal pl1, decimal pl2, uint timeSeconds)
+        {
+            return pl1 >= 5m && pl2 >= pl1 && pl2 <= 125m && timeSeconds >= 1 && timeSeconds <= 256;
         }
 
         private static bool IsServiceRunning(string name)

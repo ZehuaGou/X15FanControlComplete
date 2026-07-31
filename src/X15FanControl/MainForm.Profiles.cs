@@ -59,7 +59,7 @@ namespace X15FanControl
                 AutoEllipsis = true
             }, 0, 1);
 
-            layout.Controls.Add(BuildStrategyRow("自动策略", "自动使用2档作为低负载起点；持续负载30秒升到下一档，低负载持续120秒回落。"), 0, 2);
+            layout.Controls.Add(BuildStrategyRow("自动策略", "从当前实际档位开始；升档需持续10–15秒，降档需持续45–90秒，并按相邻档逐级切换。"), 0, 2);
             layout.Controls.Add(BuildStrategyRow("1档 · 安静", "25W / 35W / 28秒，CPU性能上限75%，风扇曲线最安静；高温安全爬升不受影响。"), 0, 3);
             layout.Controls.Add(BuildStrategyRow("2档 · 日常", "30W / 45W / 28秒，CPU性能上限85%，日常阅读、办公和轻量代码使用。"), 0, 4);
             layout.Controls.Add(BuildStrategyRow("3档 · 代码", "38W / 55W / 28秒，CPU性能上限95%，适合编译和持续代码任务。"), 0, 5);
@@ -97,6 +97,7 @@ namespace X15FanControl
 
         private void PopulateProfiles()
         {
+            _profileCombo.SelectedIndexChanged -= ProfileComboSelectedIndexChanged;
             _profileCombo.Items.Clear();
             _profileCombo.Items.Add(new StrategyOption { Mode = StrategyMode.Auto });
             _profileCombo.Items.Add(new StrategyOption { Mode = StrategyMode.Quiet });
@@ -114,6 +115,9 @@ namespace X15FanControl
                     break;
                 }
             }
+            if (_profileCombo.SelectedIndex < 0)
+                _profileCombo.SelectedIndex = 0;
+            _profileCombo.SelectedIndexChanged += ProfileComboSelectedIndexChanged;
         }
 
         private FanProfile GetActiveProfile()
@@ -138,16 +142,18 @@ namespace X15FanControl
         {
             if (tier == AdaptivePowerTier.Heavy || mode == StrategyMode.Heavy)
                 return DefaultProfiles.CreatePerformanceProfile();
-            if (mode == StrategyMode.Quiet)
+            if (mode == StrategyMode.Quiet || tier == AdaptivePowerTier.Quiet)
                 return DefaultProfiles.CreateQuietProfile();
+            if (tier == AdaptivePowerTier.Daily || mode == StrategyMode.Daily)
+                return DefaultProfiles.CreateDailyProfile();
             if (tier == AdaptivePowerTier.Code || mode == StrategyMode.Code)
                 return DefaultProfiles.CreateBalancedProfile();
-            return DefaultProfiles.CreateBalancedProfile();
+            return DefaultProfiles.CreateDailyProfile();
         }
 
         private static string GetCurrentStrategyLevelName(StrategyMode selectedMode, AdaptivePowerTier tier)
         {
-            if (selectedMode == StrategyMode.Quiet)
+            if (selectedMode == StrategyMode.Quiet || tier == AdaptivePowerTier.Quiet)
                 return "1档 · 安静";
             switch (tier)
             {
@@ -177,10 +183,18 @@ namespace X15FanControl
             if (selected == null || _config == null)
                 return;
 
+            StrategyMode previousMode = _config.StrategyMode;
+            AdaptivePowerTier previousTier = _adaptiveCurrentTier;
             _config.StrategyMode = selected.Mode;
-            _config.ActiveProfileName = selected.Name;
-            AdaptivePowerTier selectedTier = GetTierForMode(selected.Mode);
-            _adaptivePowerTierController?.ForceTier(selectedTier, "用户选择固定策略");
+            _config.ActiveProfileName = StrategyModeInfo.GetProfileName(selected.Mode);
+            AdaptivePowerTier selectedTier = selected.Mode == StrategyMode.Auto
+                ? GetAutoStartingTier(previousMode, previousTier)
+                : GetTierForMode(selected.Mode);
+            _adaptivePowerTierController?.ForceTier(
+                selectedTier,
+                selected.Mode == StrategyMode.Auto
+                    ? "自动策略从当前" + GetCurrentStrategyLevelName(previousMode, previousTier) + "开始"
+                    : "用户选择固定策略");
             _adaptiveCurrentTier = selectedTier;
             _adaptiveAppliedTier = (AdaptivePowerTier)(-1);
             _adaptiveXtuConfirmed = false;
@@ -188,7 +202,19 @@ namespace X15FanControl
             ApplyFixedFanProfile(selectedTier);
             UpdateTrayStrategyStatus();
             SaveConfig();
-            AppendLog("已选择固定策略：" + selected.Name + "；功耗和风扇参数由内置策略管理");
+            AppendLog("已选择策略：" + selected.Name + "；功耗和风扇参数由内置策略管理");
+        }
+
+        private static AdaptivePowerTier GetAutoStartingTier(StrategyMode previousMode, AdaptivePowerTier currentTier)
+        {
+            if (previousMode == StrategyMode.Auto)
+                return currentTier;
+            if (currentTier == AdaptivePowerTier.Quiet ||
+                currentTier == AdaptivePowerTier.Daily ||
+                currentTier == AdaptivePowerTier.Code ||
+                currentTier == AdaptivePowerTier.Heavy)
+                return currentTier;
+            return GetTierForMode(previousMode);
         }
 
         private void SelectStrategyFromTray(StrategyMode mode)

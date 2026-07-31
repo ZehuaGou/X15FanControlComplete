@@ -438,6 +438,8 @@ namespace X15FanControl
                             decision = _engine.Update(snapshot);
                         }
 
+                        ApplyCpuRpmSafetyGuard(snapshot, decision, now);
+
                         if (decision.RequestAutoFallback)
                         {
                             // 必须回到UI线程执行安全操作
@@ -518,6 +520,49 @@ namespace X15FanControl
             }
 
             Interlocked.Exchange(ref _controlLoopGuard, 0);
+        }
+
+        private void ApplyCpuRpmSafetyGuard(FanSnapshot snapshot, ControlDecision decision, DateTime nowUtc)
+        {
+            if (snapshot == null || decision == null || decision.Cpu == null || _runMode != RunMode.Active)
+                return;
+
+            // A high CPU temperature combined with a very low tachometer value
+            // must never allow the controller to keep a quiet duty. The RPM
+            // read is diagnostic and can be stale, so require two consecutive
+            // control samples, then force a safe fan duty and refresh it only
+            // every few seconds until the tachometer recovers.
+            bool lowRpmAtHighTemperature = snapshot.CpuTemperatureC >= 75 && snapshot.CpuRpm < 1000;
+            if (!lowRpmAtHighTemperature)
+            {
+                if (snapshot.CpuTemperatureC <= 72 || snapshot.CpuRpm >= 1200)
+                {
+                    _cpuLowRpmSafetySamples = 0;
+                    _cpuLowRpmSafetyActive = false;
+                }
+                return;
+            }
+
+            _cpuLowRpmSafetySamples = Math.Min(_cpuLowRpmSafetySamples + 1, 3);
+            if (_cpuLowRpmSafetySamples < 2)
+                return;
+
+            bool refreshWrite = !_cpuLowRpmSafetyActive ||
+                                nowUtc >= _lastCpuLowRpmSafetyWriteUtc.AddSeconds(5);
+            _cpuLowRpmSafetyActive = true;
+            decision.Cpu.WritePercent = Math.Max(decision.Cpu.WritePercent, 90);
+            decision.Cpu.State = ControlState.Emergency;
+            decision.Cpu.Reason = DecisionReason.RpmSafety;
+            decision.Cpu.Detail = "CPU RPM 回读过低，已启用 90% 安全转速";
+
+            if (refreshWrite)
+            {
+                decision.Cpu.ShouldWrite = true;
+                _lastCpuLowRpmSafetyWriteUtc = nowUtc;
+                AppendLog("CPU RPM保护：温度=" + snapshot.CpuTemperatureC +
+                          "°C，回读=" + snapshot.CpuRpm +
+                          " RPM；已强制 CPU 风扇至少 90%。");
+            }
         }
 
         private void TryAutoActive()
@@ -1087,7 +1132,9 @@ namespace X15FanControl
                         selectedItem.Checked = true;
 
                     StrategyMode activeTierMode = StrategyMode.Daily;
-                    if (_adaptiveCurrentTier == AdaptivePowerTier.Code)
+                    if (_adaptiveCurrentTier == AdaptivePowerTier.Quiet)
+                        activeTierMode = StrategyMode.Quiet;
+                    else if (_adaptiveCurrentTier == AdaptivePowerTier.Code)
                         activeTierMode = StrategyMode.Code;
                     else if (_adaptiveCurrentTier == AdaptivePowerTier.Heavy)
                         activeTierMode = StrategyMode.Heavy;
@@ -1559,8 +1606,9 @@ namespace X15FanControl
             {
                 if (_controlCenterLeaseWatchdogProcess != null && !_controlCenterLeaseWatchdogProcess.HasExited)
                 {
-                    if (!_controlCenterLeaseWatchdogProcess.WaitForExit(1500))
-                        _controlCenterLeaseWatchdogProcess.Kill();
+                    // Lease-only watchdog has no stop signal; terminate the
+                    // helper immediately after a successful lease release.
+                    _controlCenterLeaseWatchdogProcess.Kill();
                 }
             }
             catch { }
@@ -1801,7 +1849,7 @@ namespace X15FanControl
             else
                 AppendLog("Control loop stop timeout — proceeding with cleanup");
 
-            try { RestoreAdaptivePowerPolicy(); } catch (Exception exception) { AppendLog("恢复自适应功耗方案失败：" + exception.Message); }
+            try { await RestoreAdaptivePowerPolicyAsync(); } catch (Exception exception) { AppendLog("恢复自适应功耗方案失败：" + exception.Message); }
 
             // 使验证任务失效
             InvalidateVerificationTasks();
@@ -1811,15 +1859,10 @@ namespace X15FanControl
             try { RestoreAuto("应用程序关闭"); } catch { }
             AppendLog("RestoreAuto end");
 
-            // 停止附加服务
+            // 停止风扇看门狗；Control Center 租约恢复不能在 UI 线程同步等待
+            // 服务启动。服务可能需要数秒，超时时保留租约看门狗接管恢复。
             try { StopWatchdog(); } catch { }
-            try { StopControlCenterLeaseWatchdog(); } catch { }
-            if (_controlCenterLease != null)
-            {
-                string controlCenterDiagnostic;
-                bool restored = _controlCenterLease.Release(out controlCenterDiagnostic);
-                AppendLog((restored ? "Control Center 已恢复：" : "Control Center 恢复失败：") + controlCenterDiagnostic);
-            }
+            await ReleaseControlCenterLeaseForExitAsync();
             try { _heartbeat?.WriteStop(); } catch { }
 
             // 停止GPU遥测
@@ -1860,6 +1903,44 @@ namespace X15FanControl
                 BeginInvoke(finalClose);
             else
                 finalClose();
+        }
+
+        private async Task ReleaseControlCenterLeaseForExitAsync()
+        {
+            ControlCenterLease lease = _controlCenterLease;
+            if (lease == null)
+            {
+                return;
+            }
+
+            Task<Tuple<bool, string>> releaseTask = Task.Run(() =>
+            {
+                string diagnostic;
+                bool restored = lease.Release(out diagnostic);
+                return Tuple.Create(restored, diagnostic);
+            });
+
+            try
+            {
+                Task completed = await Task.WhenAny(releaseTask, Task.Delay(1500)).ConfigureAwait(true);
+                if (completed == releaseTask)
+                {
+                    Tuple<bool, string> result = await releaseTask.ConfigureAwait(true);
+                    AppendLog((result.Item1 ? "Control Center 已恢复：" : "Control Center 恢复失败：") + result.Item2);
+                    if (result.Item1)
+                    {
+                        try { StopControlCenterLeaseWatchdog(); } catch { }
+                    }
+                }
+                else
+                {
+                    AppendLog("Control Center 恢复服务仍在启动，退出不再等待；交由接管看门狗继续恢复。");
+                }
+            }
+            catch (Exception exception)
+            {
+                AppendLog("Control Center 恢复任务异常，交由接管看门狗处理：" + exception.Message);
+            }
         }
 
         private void DisposeEc()

@@ -12,6 +12,7 @@ namespace X15FanCore.Control
             config.StrategyMode = StrategyMode.Auto;
             config.Profiles.Add(CreateAutoProfile());
             config.Profiles.Add(CreateQuietProfile());
+            config.Profiles.Add(CreateDailyProfile());
             config.Profiles.Add(CreateBalancedProfile());
             config.Profiles.Add(CreatePerformanceProfile());
             return config;
@@ -21,7 +22,7 @@ namespace X15FanCore.Control
         {
             FanProfile profile = CreateQuietProfile();
             profile.Name = "自动";
-            profile.Description = "自动策略入口。运行时根据持续负载在安静、代码和重负载固定档位之间切换。";
+            profile.Description = "自动策略入口。运行时根据持续负载在安静、日常、代码和重负载四档之间切换。";
             return profile;
         }
 
@@ -58,6 +59,49 @@ namespace X15FanCore.Control
             profile.Gpu.StableZoneHoldPercent = 50;
             profile.Gpu.UpRatePercentPerSecond = 1.2;
             profile.Gpu.DownRatePercentPerSecond = 0.3;
+            profile.Gpu.DownHoldSeconds = 15;
+            profile.Gpu.HysteresisC = 3;
+            profile.Gpu.TargetDeadbandPercent = 1.5;
+            profile.Gpu.FilterWindowSamples = 4;
+            profile.Gpu.FastEmaAlpha = 0.4;
+            profile.Gpu.SlowEmaAlpha = 0.15;
+
+            ApplySafetyPolicy(profile);
+            return profile;
+        }
+
+        public static FanProfile CreateDailyProfile()
+        {
+            FanProfile profile = new FanProfile
+            {
+                Name = "日常",
+                Description = "日常固定策略：30W/45W，较代码档更低的稳定风扇曲线。",
+                CouplingEnabled = false,
+                CouplingStartTemperatureC = 78,
+                CouplingMaximumPercent = 3
+            };
+
+            profile.Cpu.Curve = Points(40, 5, 50, 12, 60, 30, 70, 45, 75, 50, 80, 58, 85, 70, 90, 92, 93, 100);
+            profile.Cpu.StableZoneEnabled = true;
+            profile.Cpu.StableZoneMinimumPercent = 45;
+            profile.Cpu.StableZoneMaximumPercent = 50;
+            profile.Cpu.StableZoneHoldPercent = 48;
+            profile.Cpu.UpRatePercentPerSecond = 1.3;
+            profile.Cpu.DownRatePercentPerSecond = 0.35;
+            profile.Cpu.DownHoldSeconds = 15;
+            profile.Cpu.HysteresisC = 3;
+            profile.Cpu.TargetDeadbandPercent = 1.5;
+            profile.Cpu.FilterWindowSamples = 4;
+            profile.Cpu.FastEmaAlpha = 0.45;
+            profile.Cpu.SlowEmaAlpha = 0.18;
+
+            profile.Gpu.Curve = Points(40, 5, 50, 10, 60, 22, 70, 35, 75, 45, 80, 58, 85, 78, 90, 100);
+            profile.Gpu.StableZoneEnabled = true;
+            profile.Gpu.StableZoneMinimumPercent = 43;
+            profile.Gpu.StableZoneMaximumPercent = 50;
+            profile.Gpu.StableZoneHoldPercent = 46;
+            profile.Gpu.UpRatePercentPerSecond = 1.1;
+            profile.Gpu.DownRatePercentPerSecond = 0.28;
             profile.Gpu.DownHoldSeconds = 15;
             profile.Gpu.HysteresisC = 3;
             profile.Gpu.TargetDeadbandPercent = 1.5;
