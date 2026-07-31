@@ -12,7 +12,10 @@ namespace X15FanWatchdog
 {
     internal static class Program
     {
-        private const double HeartbeatTimeoutSeconds = 12;
+        // 心跳超时阈值。控制循环偶尔会因 EC 写入验证耗时 5–6 秒，
+        // 12 秒余量会导致看门狗误触发。30 秒既保留快速故障恢复，
+        // 又给慢速 EC 操作足够余量。
+        private const double HeartbeatTimeoutSeconds = 30;
 
         private static int Main(string[] args)
         {
