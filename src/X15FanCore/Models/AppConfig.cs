@@ -1,5 +1,6 @@
 using System.Collections.Generic;
 using System.Runtime.Serialization;
+using X15FanCore.Control;
 
 namespace X15FanCore.Models
 {
@@ -9,7 +10,8 @@ namespace X15FanCore.Models
         public AppConfig()
         {
             ConfigVersion = 2;
-            ActiveProfileName = "静音稳定－平衡";
+            ActiveProfileName = "自动";
+            StrategyMode = StrategyMode.Auto;
             StartupMode = RunMode.ReadOnly;
             PollIntervalMs = 500;
             StartMinimized = false;
@@ -25,6 +27,8 @@ namespace X15FanCore.Models
             UiRefreshIntervalMs = 500;
             ChartSampleIntervalMs = 1000;
             MaxUiLogLines = 1500;
+            AdaptivePowerEnabled = true;
+            AdaptivePower = new AdaptivePowerSettings();
         }
 
         [DataMember(Order = 0)]
@@ -78,5 +82,18 @@ namespace X15FanCore.Models
 
         [DataMember(Order = 16)]
         public int MaxUiLogLines { get; set; }
+
+        [DataMember(Order = 17)]
+        [System.ComponentModel.Browsable(false)]
+        public bool AdaptivePowerEnabled { get; set; }
+
+        [DataMember(Order = 18)]
+        [System.ComponentModel.Browsable(false)]
+        public AdaptivePowerSettings AdaptivePower { get; set; }
+
+        // Fixed built-in strategy selection. Power and dwell values are not
+        // exposed as user-editable configuration.
+        [DataMember(Order = 19)]
+        public StrategyMode StrategyMode { get; set; }
     }
 }

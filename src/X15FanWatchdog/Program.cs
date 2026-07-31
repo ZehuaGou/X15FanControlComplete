@@ -1,8 +1,11 @@
 using System;
 using System.Diagnostics;
+using System.Globalization;
 using System.IO;
 using System.Linq;
+using System.Text;
 using System.Threading;
+using X15FanCore.Control;
 using X15FanCore.Native;
 
 namespace X15FanWatchdog
@@ -16,8 +19,12 @@ namespace X15FanWatchdog
             try
             {
                 Options options = Options.Parse(args);
+                if (options.LeaseOnly)
+                    return RunLeaseOnly(options);
                 Log(options.LogPath, "看门狗已启动，父进程 PID " + options.ParentProcessId + "。");
                 DateTime startUtc = DateTime.UtcNow;
+                EventWaitHandle pulseEvent = Heartbeat.OpenExistingPulseEvent(options.HeartbeatPath);
+                DateTime lastPulseUtc = DateTime.UtcNow;
 
                 while (true)
                 {
@@ -29,7 +36,20 @@ namespace X15FanWatchdog
                     }
 
                     bool parentAlive = IsProcessAlive(options.ParentProcessId);
-                    DateTime heartbeatTime = File.Exists(options.HeartbeatPath) ? File.GetLastWriteTimeUtc(options.HeartbeatPath) : DateTime.MinValue;
+                    DateTime heartbeatTime;
+                    if (pulseEvent != null)
+                    {
+                        if (pulseEvent.WaitOne(1000))
+                        {
+                            lastPulseUtc = DateTime.UtcNow;
+                        }
+                        heartbeatTime = lastPulseUtc;
+                    }
+                    else
+                    {
+                        heartbeatTime = GetHeartbeatTime(options.HeartbeatPath, heartbeat);
+                        Thread.Sleep(1000);
+                    }
                     bool startupGrace = (DateTime.UtcNow - startUtc).TotalSeconds < 10;
                     // EC verification can legitimately hold the control loop for
                     // a little over five seconds. Keep enough margin to avoid a
@@ -45,7 +65,6 @@ namespace X15FanWatchdog
                         return 2;
                     }
 
-                    Thread.Sleep(1000);
                 }
             }
             catch (Exception exception)
@@ -60,6 +79,18 @@ namespace X15FanWatchdog
                 }
                 return 1;
             }
+        }
+
+        private static int RunLeaseOnly(Options options)
+        {
+            Log(options.LogPath, "Control Center 接管看门狗已启动，父进程 PID " + options.ParentProcessId + "。");
+            while (IsProcessAlive(options.ParentProcessId))
+                Thread.Sleep(1000);
+
+            string diagnostic;
+            bool restored = ControlCenterLease.RestorePersisted(options.LeasePath, out diagnostic);
+            Log(options.LogPath, (restored ? "父进程退出，Control Center 已恢复：" : "父进程退出，Control Center 恢复失败：") + diagnostic);
+            return restored ? 0 : 2;
         }
 
         private static void RestoreAuto(string dllPath, string logPath)
@@ -97,12 +128,39 @@ namespace X15FanWatchdog
         {
             try
             {
-                return File.Exists(path) ? File.ReadAllText(path) : string.Empty;
+                if (!File.Exists(path)) return string.Empty;
+
+                // File.Replace needs delete sharing on the destination. The
+                // watchdog only needs a short diagnostic read, so do not
+                // block an atomic heartbeat publication while reading it.
+                using (FileStream stream = new FileStream(
+                    path,
+                    FileMode.Open,
+                    FileAccess.Read,
+                    FileShare.ReadWrite | FileShare.Delete))
+                using (StreamReader reader = new StreamReader(stream, Encoding.UTF8, true))
+                {
+                    return reader.ReadToEnd();
+                }
             }
             catch
             {
                 return string.Empty;
             }
+        }
+
+        private static DateTime GetHeartbeatTime(string path, string heartbeat)
+        {
+            string[] fields = (heartbeat ?? string.Empty).Split('|');
+            DateTime payloadTime;
+            if (fields.Length >= 3 &&
+                DateTime.TryParse(fields[2], CultureInfo.InvariantCulture,
+                    DateTimeStyles.RoundtripKind, out payloadTime))
+            {
+                return payloadTime.ToUniversalTime();
+            }
+
+            return File.Exists(path) ? File.GetLastWriteTimeUtc(path) : DateTime.MinValue;
         }
 
         private static void Log(string path, string message)
@@ -127,6 +185,8 @@ namespace X15FanWatchdog
             public string HeartbeatPath { get; private set; }
             public string DllPath { get; private set; }
             public string LogPath { get; private set; }
+            public string LeasePath { get; private set; }
+            public bool LeaseOnly { get; private set; }
 
             public static Options Parse(string[] args)
             {
@@ -134,7 +194,11 @@ namespace X15FanWatchdog
                 string heartbeat = GetArgument(args, "--heartbeat");
                 string dll = GetArgument(args, "--dll");
                 string log = GetArgument(args, "--log");
-                if (string.IsNullOrEmpty(parent) || string.IsNullOrEmpty(heartbeat) || string.IsNullOrEmpty(dll))
+                bool leaseOnly = args.Any(value => string.Equals(value, "--lease-only", StringComparison.OrdinalIgnoreCase));
+                string lease = GetArgument(args, "--lease");
+                if (string.IsNullOrEmpty(parent) ||
+                    (leaseOnly && string.IsNullOrEmpty(lease)) ||
+                    (!leaseOnly && (string.IsNullOrEmpty(heartbeat) || string.IsNullOrEmpty(dll))))
                 {
                     throw new ArgumentException("必需参数：--parent <pid> --heartbeat <path> --dll <path> [--log <path>]");
                 }
@@ -144,7 +208,9 @@ namespace X15FanWatchdog
                     ParentProcessId = int.Parse(parent),
                     HeartbeatPath = heartbeat,
                     DllPath = dll,
-                    LogPath = string.IsNullOrEmpty(log) ? Path.Combine(Path.GetTempPath(), "X15FanWatchdog.log") : log
+                    LogPath = string.IsNullOrEmpty(log) ? Path.Combine(Path.GetTempPath(), "X15FanWatchdog.log") : log,
+                    LeasePath = lease,
+                    LeaseOnly = leaseOnly
                 };
             }
         }

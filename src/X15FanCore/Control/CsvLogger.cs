@@ -16,7 +16,7 @@ namespace X15FanCore.Control
             Directory.CreateDirectory(directory);
             FilePath = Path.Combine(directory, "fan-" + DateTime.Now.ToString("yyyyMMdd-HHmmss") + ".csv");
             _writer = new StreamWriter(FilePath, false, new UTF8Encoding(true));
-            _writer.WriteLine("timestamp_utc,cpu_temp_ec,gpu_temp_nvidia,cpu_ec_local,gpu_ec_remote,gpu_telemetry_source,gpu_utilization,gpu_power_watts,gpu_pstate,cpu_duty,gpu_duty,cpu_rpm,gpu_rpm,cpu_fast,cpu_slow,cpu_control,cpu_raw,cpu_target,cpu_applied,cpu_written,cpu_readback,cpu_readback_duty,cpu_write_verified,cpu_external_override,cpu_control_state,cpu_rise_rate,cpu_reason,gpu_fast,gpu_slow,gpu_control,gpu_raw,gpu_target,gpu_applied,gpu_written,gpu_readback,gpu_readback_duty,gpu_write_verified,gpu_external_override,gpu_control_state,gpu_reason");
+            _writer.WriteLine("timestamp_utc,cpu_temp_ec,gpu_temp_nvidia,cpu_ec_local,gpu_ec_remote,gpu_telemetry_source,gpu_utilization,gpu_power_watts,gpu_pstate,cpu_utilization,cpu_performance,cpu_duty,gpu_duty,cpu_rpm,gpu_rpm,cpu_fast,cpu_slow,cpu_control,cpu_raw,cpu_target,cpu_applied,cpu_written,cpu_readback,cpu_readback_duty,cpu_write_verified,cpu_external_override,cpu_control_state,cpu_rise_rate,cpu_reason,gpu_fast,gpu_slow,gpu_control,gpu_raw,gpu_target,gpu_applied,gpu_written,gpu_readback,gpu_readback_duty,gpu_write_verified,gpu_external_override,gpu_control_state,gpu_reason");
             _writer.Flush();
         }
 
@@ -43,6 +43,8 @@ namespace X15FanCore.Control
                     snapshot.GpuTelemetryUtilization.ToString(CultureInfo.InvariantCulture),
                     F(snapshot.GpuTelemetryPowerWatts),
                     CsvEscape(snapshot.GpuTelemetryPState),
+                    F(snapshot.CpuUtilizationPercent),
+                    F(snapshot.CpuPerformancePercent),
                     snapshot.CpuDutyPercent.ToString(CultureInfo.InvariantCulture),
                     snapshot.GpuDutyPercent.ToString(CultureInfo.InvariantCulture),
                     snapshot.CpuRpm.ToString(CultureInfo.InvariantCulture),

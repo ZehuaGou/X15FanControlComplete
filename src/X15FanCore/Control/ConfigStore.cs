@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
 using System.Runtime.Serialization.Json;
@@ -137,6 +138,27 @@ namespace X15FanCore.Control
             if (config.UiRefreshIntervalMs <= 0) { config.UiRefreshIntervalMs = 500; changed = true; }
             if (config.ChartSampleIntervalMs <= 0) { config.ChartSampleIntervalMs = 1000; changed = true; }
             if (config.MaxUiLogLines <= 0) { config.MaxUiLogLines = 1500; changed = true; }
+            if (config.AdaptivePower == null)
+            {
+                config.AdaptivePower = new AdaptivePowerSettings();
+                changed = true;
+            }
+            config.AdaptivePower.Normalize();
+
+            StrategyMode parsedMode;
+            if (StrategyModeInfo.TryParse(config.ActiveProfileName, out parsedMode))
+            {
+                if (config.StrategyMode != parsedMode)
+                {
+                    config.StrategyMode = parsedMode;
+                    changed = true;
+                }
+            }
+            else if (!System.Enum.IsDefined(typeof(StrategyMode), config.StrategyMode))
+            {
+                config.StrategyMode = StrategyMode.Auto;
+                changed = true;
+            }
 
             return changed;
         }
@@ -144,30 +166,166 @@ namespace X15FanCore.Control
         // 将默认配置中有但用户配置中没有的配置追加进去，方便用户升级后使用新配置
         private static bool MergeDefaultProfiles(AppConfig userConfig, AppConfig defaultConfig)
         {
-            if (defaultConfig?.Profiles == null)
+            if (userConfig == null || userConfig.Profiles == null || defaultConfig?.Profiles == null)
                 return false;
 
             bool changed = false;
-            foreach (FanProfile defaultProfile in defaultConfig.Profiles)
+            Dictionary<string, FanProfile> selectedBuiltIns = new Dictionary<string, FanProfile>(StringComparer.OrdinalIgnoreCase);
+            List<FanProfile> retainedProfiles = new List<FanProfile>();
+            string activeBuiltInKey = null;
+
+            foreach (FanProfile userProfile in userConfig.Profiles)
             {
-                bool exists = false;
-                foreach (FanProfile userProfile in userConfig.Profiles)
+                string builtInKey = GetBuiltInKey(userProfile);
+                if (string.Equals(userProfile?.Name, userConfig.ActiveProfileName, StringComparison.OrdinalIgnoreCase))
+                    activeBuiltInKey = builtInKey;
+
+                if (builtInKey == null)
                 {
-                    if (userProfile.Name == defaultProfile.Name)
-                    {
-                        exists = true;
-                        break;
-                    }
+                    retainedProfiles.Add(userProfile);
+                    continue;
                 }
 
-                if (!exists)
+                if (selectedBuiltIns.ContainsKey(builtInKey))
                 {
-                    userConfig.Profiles.Add(defaultProfile);
+                    changed = true;
+                    continue;
+                }
+
+                FanProfile canonical = FindDefaultProfile(defaultConfig, builtInKey);
+                if (canonical == null)
+                {
+                    // Brz Legacy is a retired rollback profile, not a normal user mode.
+                    // Drop it instead of silently reintroducing it on every startup.
+                    changed = true;
+                    continue;
+                }
+
+                selectedBuiltIns[builtInKey] = userProfile;
+                if (!string.Equals(userProfile.Name, canonical.Name, StringComparison.Ordinal))
+                {
+                    userProfile.Name = canonical.Name;
+                    changed = true;
+                }
+                changed |= DefaultProfiles.ApplySafetyPolicy(userProfile);
+                retainedProfiles.Add(userProfile);
+            }
+
+            foreach (FanProfile defaultProfile in defaultConfig.Profiles)
+            {
+                string builtInKey = GetBuiltInKey(defaultProfile);
+                if (builtInKey == null || selectedBuiltIns.ContainsKey(builtInKey))
+                    continue;
+
+                retainedProfiles.Add(defaultProfile);
+                selectedBuiltIns[builtInKey] = defaultProfile;
+                changed = true;
+            }
+
+            if (retainedProfiles.Count == 0)
+                return true;
+
+            userConfig.Profiles = retainedProfiles;
+            if (activeBuiltInKey != null)
+            {
+                FanProfile active = FindDefaultProfile(userConfig, activeBuiltInKey);
+                if (active != null && !string.Equals(userConfig.ActiveProfileName, active.Name, StringComparison.Ordinal))
+                {
+                    userConfig.ActiveProfileName = active.Name;
+                    changed = true;
+                }
+                else if (active == null)
+                {
+                    userConfig.ActiveProfileName = userConfig.Profiles[0].Name;
                     changed = true;
                 }
             }
+            else if (string.IsNullOrWhiteSpace(userConfig.ActiveProfileName) || FindProfile(userConfig, userConfig.ActiveProfileName) == null)
+            {
+                userConfig.ActiveProfileName = userConfig.Profiles[0].Name;
+                changed = true;
+            }
 
             return changed;
+        }
+
+        private static FanProfile FindDefaultProfile(AppConfig config, string key)
+        {
+            if (config?.Profiles == null)
+                return null;
+
+            foreach (FanProfile profile in config.Profiles)
+            {
+                if (string.Equals(GetBuiltInKey(profile), key, StringComparison.OrdinalIgnoreCase))
+                    return profile;
+            }
+
+            return null;
+        }
+
+        private static FanProfile FindProfile(AppConfig config, string name)
+        {
+            if (config?.Profiles == null || name == null)
+                return null;
+
+            foreach (FanProfile profile in config.Profiles)
+            {
+                if (string.Equals(profile?.Name, name, StringComparison.OrdinalIgnoreCase))
+                    return profile;
+            }
+
+            return null;
+        }
+
+        private static string GetBuiltInKey(FanProfile profile)
+        {
+            if (profile == null)
+                return null;
+
+            string name = profile.Name ?? string.Empty;
+            if (name.Equals("自动", StringComparison.OrdinalIgnoreCase) ||
+                name.IndexOf("Auto", StringComparison.OrdinalIgnoreCase) >= 0)
+                return "Auto";
+
+            if (name.Equals("代码", StringComparison.OrdinalIgnoreCase) ||
+                name.IndexOf("Stable", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.IndexOf("Code", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.IndexOf("LowNoise", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                HasPoint(profile.Cpu, 50, 15) && HasPoint(profile.Cpu, 80, 54) && HasPoint(profile.Gpu, 70, 42))
+                return "Code";
+
+            if (name.IndexOf("Quiet", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.IndexOf("Silent", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.IndexOf("静音", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                HasPoint(profile.Cpu, 65, 35) && HasPoint(profile.Cpu, 75, 55) && HasPoint(profile.Cpu, 95, 100))
+                return "Quiet";
+
+            if (name.Equals("重负载", StringComparison.OrdinalIgnoreCase) ||
+                name.IndexOf("Performance", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.IndexOf("Heavy", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                HasPoint(profile.Cpu, 80, 70) && HasPoint(profile.Cpu, 85, 88) && HasPoint(profile.Gpu, 80, 65))
+                return "Heavy";
+
+            if (name.IndexOf("Brz", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                name.IndexOf("BRZ", StringComparison.OrdinalIgnoreCase) >= 0 ||
+                HasPoint(profile.Cpu, 80, 60) && HasPoint(profile.Cpu, 85, 82) && HasPoint(profile.Gpu, 80, 55))
+                return "Brz Legacy";
+
+            return null;
+        }
+
+        private static bool HasPoint(FanChannelProfile channel, double temperature, double percent)
+        {
+            if (channel?.Curve == null)
+                return false;
+
+            foreach (FanCurvePoint point in channel.Curve)
+            {
+                if (Math.Abs(point.TemperatureC - temperature) < 0.01 && Math.Abs(point.PowerPercent - percent) < 0.01)
+                    return true;
+            }
+
+            return false;
         }
     }
 }
