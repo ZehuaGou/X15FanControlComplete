@@ -1360,5 +1360,268 @@ namespace X15FanControl
             public double FilteredMax;
             public double FilteredStdDev;
         }
+
+        /// <summary>
+        /// Measures a small downward duty sweep around the user's normal operating point.
+        /// This is deliberately separate from the low-temperature calibration flow: it never
+        /// changes the saved profile and it stops at the Stable emergency thresholds.
+        /// </summary>
+        public int RunOperatingPointCalibration()
+        {
+            string timestamp = DateTime.Now.ToString("yyyyMMdd-HHmmss");
+            string logPath = Path.Combine(_verifyDir, $"operating-point-{timestamp}.log");
+            string csvPath = Path.Combine(_verifyDir, $"operating-point-{timestamp}.csv");
+            _logWriter = new StreamWriter(logPath, false, System.Text.Encoding.UTF8) { AutoFlush = true };
+
+            bool ecInitialized = false;
+            StreamWriter csv = null;
+
+            try
+            {
+                Log("=== operating-point measurement begin ===");
+                if (!InitEc())
+                {
+                    Log("FAIL: EC initialization failed");
+                    return 1;
+                }
+                ecInitialized = true;
+
+                _gpuTelemetry = new GpuTelemetryClient(pollIntervalMs: 1000);
+                if (!_gpuTelemetry.Start())
+                {
+                    Log("FAIL: GPU telemetry could not start");
+                    return 1;
+                }
+
+                bool telemetryOk = false;
+                for (int i = 0; i < 30 && !telemetryOk; i++)
+                {
+                    Thread.Sleep(500);
+                    _lastGpuTelemetry = _gpuTelemetry.Latest;
+                    telemetryOk = _lastGpuTelemetry != null &&
+                                  _lastGpuTelemetry.IsAvailable &&
+                                  !_lastGpuTelemetry.IsStale;
+                }
+
+                var cpuBefore = EcReadRaw(1);
+                var gpuBefore = EcReadRaw(2);
+                _lastGpuTelemetry = _gpuTelemetry.Latest;
+                if (!telemetryOk || _lastGpuTelemetry == null || !_lastGpuTelemetry.IsAvailable || _lastGpuTelemetry.IsStale)
+                {
+                    Log("FAIL: GPU telemetry is unavailable; no manual sweep was attempted");
+                    return 1;
+                }
+
+                Log($"baseline: CPU={cpuBefore.Remote}C duty={cpuBefore.FanDuty * 100.0 / 255.0:F1}%, " +
+                    $"GPU={_lastGpuTelemetry.TemperatureC}C duty={gpuBefore.FanDuty * 100.0 / 255.0:F1}%");
+                Log("safety limits: CPU >=87C, GPU >=82C for the channel under test; other channel may not rise above its limit");
+
+                csv = new StreamWriter(csvPath, false, System.Text.Encoding.UTF8) { AutoFlush = true };
+                csv.WriteLine("channel,target_pct,readback_pct,start_temp_c,end_temp_c,avg_temp_c,max_temp_c,rpm,status");
+
+                // Start from the firmware-controlled state. The test restores both channels in finally.
+                EcSetFanAuto(1);
+                EcSetFanAuto(2);
+                Thread.Sleep(1000);
+
+                int cpuResult = MeasureOperatingPointChannel(1, csv);
+                int gpuResult = MeasureOperatingPointChannel(2, csv);
+
+                Log($"results: CPU={cpuResult}, GPU={gpuResult}");
+                Log($"CSV: {csvPath}");
+                return (cpuResult == 0 && gpuResult == 0) ? 0 : 3;
+            }
+            catch (Exception ex)
+            {
+                Log($"measurement exception: {ex}");
+                return 1;
+            }
+            finally
+            {
+                if (ecInitialized)
+                {
+                    try
+                    {
+                        EcRestoreAll();
+                        Log("both fan channels restored to Auto");
+                    }
+                    catch (Exception restoreEx)
+                    {
+                        Log($"FAIL: Auto restore exception: {restoreEx.Message}");
+                    }
+                }
+
+                csv?.Dispose();
+                _logWriter?.Dispose();
+                Dispose();
+            }
+        }
+
+        private int MeasureOperatingPointChannel(int channel, StreamWriter csv)
+        {
+            int otherChannel = channel == 1 ? 2 : 1;
+            int channelLimit = channel == 1 ? 87 : 82;
+            int otherLimit = channel == 1 ? 82 : 87;
+            string channelName = channel == 1 ? "CPU" : "GPU";
+
+            // Never manually drive the other fan while testing one channel.
+            EcSetFanAuto(otherChannel);
+
+            var beforeTarget = EcReadRaw(channel);
+            var beforeCpu = channel == 1 ? beforeTarget : EcReadRaw(1);
+            _lastGpuTelemetry = _gpuTelemetry?.Latest;
+            if (_lastGpuTelemetry == null || !_lastGpuTelemetry.IsAvailable || _lastGpuTelemetry.IsStale)
+            {
+                Log($"{channelName}: telemetry unavailable; skipped");
+                return 1;
+            }
+
+            int startTemp = channel == 1 ? beforeTarget.Remote : _lastGpuTelemetry.TemperatureC;
+            int startDuty = ClampPercent((int)Math.Round(beforeTarget.FanDuty * 100.0 / 255.0));
+            Log($"{channelName}: start {startTemp}C, duty={startDuty}%");
+
+            // At or one degree below the protection line, record the current point only.
+            // A downward write at the line itself would defeat the safety floor we are testing.
+            if (startTemp >= channelLimit - 1)
+            {
+                WriteOperatingPointRow(csv, channelName, startDuty, beforeTarget, startTemp, startTemp, startTemp, startTemp, 0, "protected-floor");
+                Log($"{channelName}: {startTemp}C is too close to the {channelLimit}C protection line; current duty is the measured floor");
+                return 0;
+            }
+
+            // Only a local sweep is allowed. Eight points is enough to find the first plateau
+            // without turning this command into an unrestricted calibration routine.
+            int maxSteps = channel == 1 ? 4 : 8;
+            if (startTemp >= channelLimit - 3)
+                maxSteps = 1;
+
+            int firstCandidate = Math.Max(30, startDuty - 1);
+            int lastStable = startDuty;
+            bool foundStablePoint = false;
+
+            for (int step = 0; step < maxSteps && firstCandidate - step >= 30; step++)
+            {
+                int target = firstCandidate - step;
+                var currentCpu = EcReadRaw(1);
+                _lastGpuTelemetry = _gpuTelemetry.Latest;
+                if (_lastGpuTelemetry == null || !_lastGpuTelemetry.IsAvailable || _lastGpuTelemetry.IsStale)
+                {
+                    Log($"{channelName} {target}%: telemetry lost; stopping");
+                    break;
+                }
+
+                int cpuTemp = currentCpu.Remote;
+                int gpuTemp = _lastGpuTelemetry.TemperatureC;
+                if ((channel == 1 && cpuTemp >= channelLimit) ||
+                    (channel == 2 && gpuTemp >= channelLimit) ||
+                    (channel == 1 && gpuTemp > otherLimit) ||
+                    (channel == 2 && cpuTemp > otherLimit))
+                {
+                    Log($"{channelName} {target}%: safety precheck stopped at CPU={cpuTemp}C GPU={gpuTemp}C");
+                    break;
+                }
+
+                EcSetFanPercent(channel, target);
+                var samples = new List<int>();
+                string status = "stable";
+                bool unsafePoint = false;
+
+                // 8 samples x 3 seconds gives the heat sink time to react while keeping the
+                // test short enough to stop promptly if the temperature rises.
+                for (int sample = 0; sample < 8; sample++)
+                {
+                    Thread.Sleep(3000);
+                    var cpuNow = EcReadRaw(1);
+                    _lastGpuTelemetry = _gpuTelemetry.Latest;
+                    if (_lastGpuTelemetry == null || !_lastGpuTelemetry.IsAvailable || _lastGpuTelemetry.IsStale)
+                    {
+                        status = "telemetry-lost";
+                        unsafePoint = true;
+                        break;
+                    }
+
+                    int cpuNowTemp = cpuNow.Remote;
+                    int gpuNowTemp = _lastGpuTelemetry.TemperatureC;
+                    int targetTemp = channel == 1 ? cpuNowTemp : gpuNowTemp;
+                    samples.Add(targetTemp);
+
+                    if ((channel == 1 && cpuNowTemp >= channelLimit) ||
+                        (channel == 2 && gpuNowTemp >= channelLimit) ||
+                        (channel == 1 && gpuNowTemp > otherLimit) ||
+                        (channel == 2 && cpuNowTemp > otherLimit))
+                    {
+                        status = "safety-stop";
+                        unsafePoint = true;
+                        break;
+                    }
+
+                    if (targetTemp > startTemp + 2)
+                    {
+                        status = "temperature-rise";
+                        unsafePoint = true;
+                        break;
+                    }
+                }
+
+                if (samples.Count == 0)
+                {
+                    Log($"{channelName} {target}%: no samples; stopping");
+                    break;
+                }
+
+                int endTemp = samples[samples.Count - 1];
+                int maxTemp = samples.Max();
+                double avgTemp = samples.Average();
+                bool stable = !unsafePoint && maxTemp <= startTemp + 1 && endTemp <= startTemp + 1;
+                if (!stable && status == "stable")
+                    status = "not-stable";
+
+                int rpm = 0;
+                if (stable)
+                {
+                    try { rpm = channel == 1 ? EcGetCpuRpm() : EcGetGpuRpm(); }
+                    catch (Exception rpmEx) { Log($"{channelName} {target}%: RPM read failed: {rpmEx.Message}"); }
+                }
+
+                var readback = EcReadRaw(channel);
+                if (target > 0 && readback.FanDuty == 0)
+                {
+                    // A single zero duty byte was observed during the first
+                    // operating-point run. Retry only this anomalous sample so
+                    // the report cannot mistake a transient read for 0% duty.
+                    Log($"{channelName} {target}%: duty readback was 0; retrying once");
+                    Thread.Sleep(250);
+                    var retry = EcReadRaw(channel);
+                    if (retry.FanDuty != 0)
+                        readback = retry;
+                    else
+                        status = status == "stable" ? "readback-invalid" : status + ";readback-invalid";
+                }
+                WriteOperatingPointRow(csv, channelName, target, readback, startTemp, endTemp, avgTemp, maxTemp, rpm, status);
+                Log($"{channelName} {target}%: temp {startTemp}->{endTemp}C, avg={avgTemp:F1}C, max={maxTemp}C, RPM={rpm}, {status}");
+
+                if (!stable)
+                    break;
+
+                foundStablePoint = true;
+                lastStable = target;
+            }
+
+            // The caller's finally block performs the authoritative Auto restore.
+            Log($"{channelName}: lowest stable tested duty={lastStable}%" +
+                (foundStablePoint ? "" : " (no downward point accepted)"));
+            return 0;
+        }
+
+        private static void WriteOperatingPointRow(StreamWriter csv, string channel, int targetPct, EcData readback,
+            double startTemp, double endTemp, double avgTemp, double maxTemp, int rpm, string status)
+        {
+            csv.WriteLine($"{channel},{targetPct},{readback.FanDuty * 100.0 / 255.0:F1},{startTemp:F1},{endTemp:F1},{avgTemp:F1},{maxTemp:F1},{rpm},{status}");
+        }
+
+        private static int ClampPercent(int value)
+        {
+            return Math.Max(0, Math.Min(100, value));
+        }
     }
 }

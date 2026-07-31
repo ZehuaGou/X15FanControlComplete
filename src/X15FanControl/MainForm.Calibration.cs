@@ -231,7 +231,7 @@ namespace X15FanControl
 
         private void CalibrationStartButtonClick(object sender, EventArgs e)
         {
-            if (_ec == null)
+            if (!IsEcReady())
             {
                 MessageBox.Show("EC 接口不可用。", "校准", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
@@ -485,7 +485,7 @@ namespace X15FanControl
             int rpm;
             try
             {
-                // 校准点使用即时EC回读；包装器与后台ReadSnapshot共用_ecLock。
+                // 校准点使用即时EC回读；包装器与后台控制循环共用EC队列。
                 raw = EcReadRaw(channel);
                 rpm = fan == FanKind.Cpu ? EcGetCpuRpmLocked() : EcGetGpuRpmLocked();
             }
@@ -595,7 +595,7 @@ namespace X15FanControl
 
         private void StartPresetCalibration(object sender, EventArgs e)
         {
-            if (_ec == null)
+            if (!IsEcReady())
             {
                 MessageBox.Show("EC 接口不可用。", "校准", MessageBoxButtons.OK, MessageBoxIcon.Error);
                 return;
@@ -609,7 +609,7 @@ namespace X15FanControl
             _calibrationHold.Value = 10; // 每档10秒
 
             // 安全检查
-            int cpuTempCheck = _ec != null ? EcGetTemperatureC(1) : 0;
+            int cpuTempCheck = IsEcReady() ? EcGetTemperatureC(1) : 0;
             int gpuTempCheck = _gpuTelemetryReady && _lastGpuTelemetry != null ? _lastGpuTelemetry.TemperatureC : 0;
             
             if (cpuTempCheck >= 70)

@@ -22,116 +22,183 @@ namespace X15FanControl
             try
             {
                 DisposeEc();
+                Interlocked.Exchange(ref _ecFaulted, 0);
                 string dllPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ClevoEcInfo.dll");
-                _ecLock.Wait();
-                try
-                {
-                    _ec = new ClevoEcInfo(dllPath);
-                }
-                finally { _ecLock.Release(); }
+                _ecQueue = new EcAccessQueue(dllPath);
+                if (!_ecQueue.Ready.Wait(10000) || !_ecQueue.IsReady)
+                    throw new TimeoutException("EC worker initialization timed out.");
                 _hardwareStatusLabel.Text = "硬件：EC 已初始化；风扇通道数：" + EcGetCount() + "。CPU=1，GPU=2。";
                 _hardwareStatusLabel.ForeColor = Color.DarkGreen;
                 AppendLog("EC 初始化成功。");
             }
             catch (Exception exception)
             {
-                _ec = null;
+                DisposeEc();
                 _hardwareStatusLabel.Text = "硬件不可用：" + exception.Message;
                 _hardwareStatusLabel.ForeColor = Color.DarkRed;
                 AppendLog("EC 初始化失败：" + exception);
             }
         }
 
-        // EC串行化访问。注意：这些包装器必须直接调用 _ec，绝不能再次调用自身。
-        // 旧代码中的 EcReadRaw/EcGetDuty/EcGet*RpmLocked 都发生了自递归：
-        // 第一次拿到 SemaphoreSlim 后再次 Wait，导致 UI 定时器永久死锁。
+        private const int EcOperationTimeoutMilliseconds = 5000;
+
+        private bool IsEcReady()
+        {
+            return Volatile.Read(ref _ecFaulted) == 0 && _ecQueue != null && _ecQueue.IsReady;
+        }
+
+        private void MarkEcQueueFault(string operationName, long elapsedMilliseconds)
+        {
+            if (Interlocked.Exchange(ref _ecFaulted, 1) == 0)
+            {
+                try { _ecQueue?.Fault(); } catch { }
+                AppendLog("EC队列已熔断：" + operationName + " 超时 " + elapsedMilliseconds + "ms；停止后续EC请求，交由看门狗保护。");
+            }
+        }
+
+        // The queue owns the native object. Callers have bounded waits, while
+        // the native call itself is never aborted from a foreign thread.
+        private T ExecuteEc<T>(string name, Func<ClevoEcInfo, T> operation)
+        {
+            if (!IsEcReady()) throw new InvalidOperationException("EC尚未初始化。");
+            Stopwatch stopwatch = Stopwatch.StartNew();
+            bool completed = false;
+            try
+            {
+                T result = _ecQueue.Execute(name, operation, EcOperationTimeoutMilliseconds, CancellationToken.None);
+                completed = true;
+                return result;
+            }
+            catch (TimeoutException)
+            {
+                MarkEcQueueFault(name, stopwatch.ElapsedMilliseconds);
+                throw;
+            }
+            finally
+            {
+                if (completed) RecordEcActivity();
+                LogSlowEcOperation(name, stopwatch.ElapsedMilliseconds);
+            }
+        }
+
+        private async Task<T> ExecuteEcAsync<T>(string name, Func<ClevoEcInfo, T> operation, CancellationToken token, EcAccessPriority priority = EcAccessPriority.Control)
+        {
+            if (!IsEcReady()) throw new InvalidOperationException("EC尚未初始化。");
+            Stopwatch stopwatch = Stopwatch.StartNew();
+            Task<T> operationTask = _ecQueue.ExecuteAsync(name, operation, token, priority);
+            Task completed = await Task.WhenAny(
+                operationTask,
+                Task.Delay(EcOperationTimeoutMilliseconds, CancellationToken.None)).ConfigureAwait(false);
+            if (completed != operationTask)
+            {
+                MarkEcQueueFault(name, stopwatch.ElapsedMilliseconds);
+                LogSlowEcOperation(name, stopwatch.ElapsedMilliseconds);
+                throw new TimeoutException(name + " exceeded " + EcOperationTimeoutMilliseconds + "ms.");
+            }
+
+            bool operationCompleted = false;
+            try
+            {
+                T result = await operationTask.ConfigureAwait(false);
+                operationCompleted = true;
+                return result;
+            }
+            catch (TimeoutException)
+            {
+                MarkEcQueueFault(name, stopwatch.ElapsedMilliseconds);
+                throw;
+            }
+            finally
+            {
+                if (operationCompleted) RecordEcActivity();
+                LogSlowEcOperation(name, stopwatch.ElapsedMilliseconds);
+            }
+        }
+
+        private void LogSlowEcOperation(string name, long elapsedMilliseconds)
+        {
+            if (elapsedMilliseconds >= 1000)
+                AppendLog("EC阶段耗时：" + name + " " + elapsedMilliseconds + "ms");
+        }
+
         private int EcGetCount()
         {
-            _ecLock.Wait();
-            try { return _ec?.GetFanCount() ?? 2; }
-            finally { _ecLock.Release(); }
+            return ExecuteEc("GetFanCount", ec => ec.GetFanCount());
         }
 
         private EcData EcReadRaw(int ch)
         {
-            _ecLock.Wait();
-            try { return _ec == null ? default(EcData) : _ec.ReadRaw(ch); }
-            finally { _ecLock.Release(); }
+            return ExecuteEc("ReadRaw ch" + ch, ec => ec.ReadRaw(ch));
         }
 
         private int EcGetDuty(int ch)
         {
-            _ecLock.Wait();
-            try { return _ec?.GetDutyPercent(ch) ?? 0; }
-            finally { _ecLock.Release(); }
+            return ExecuteEc("GetDuty ch" + ch, ec => ec.GetDutyPercent(ch));
         }
 
         private int EcGetCpuRpmLocked()
         {
-            _ecLock.Wait();
-            try { return _ec?.GetCpuRpm() ?? 0; }
-            finally { _ecLock.Release(); }
+            return ExecuteEc("GetCpuRpm", ec => ec.GetCpuRpm());
         }
 
         private int EcGetGpuRpmLocked()
         {
-            _ecLock.Wait();
-            try { return _ec?.GetGpuRpm() ?? 0; }
-            finally { _ecLock.Release(); }
+            return ExecuteEc("GetGpuRpm", ec => ec.GetGpuRpm());
         }
 
         private void EcSetFanPercent(int ch, int pct)
         {
-            _ecLock.Wait();
-            try
+            ExecuteEc("SetFanPercent ch" + ch, ec =>
             {
-                if (_ec == null) throw new InvalidOperationException("EC尚未初始化。");
-                _ec.SetFanPercent(ch, pct);
-            }
-            finally { _ecLock.Release(); }
+                ec.SetFanPercent(ch, pct);
+                return true;
+            });
         }
 
         private void EcSetFanAuto(int ch)
         {
-            _ecLock.Wait();
-            try { _ec?.SetFanAuto(ch); }
-            finally { _ecLock.Release(); }
+            ExecuteEc("SetFanAuto ch" + ch, ec =>
+            {
+                ec.SetFanAuto(ch);
+                return true;
+            });
         }
 
         private void EcRestoreAllAuto()
         {
-            _ecLock.Wait();
-            try { _ec?.RestoreAllAuto(); }
-            finally { _ecLock.Release(); }
+            ExecuteEc("RestoreAllAuto", ec =>
+            {
+                ec.RestoreAllAuto();
+                return true;
+            });
+        }
+
+        private void RecordEcActivity()
+        {
+            Interlocked.Exchange(ref _lastEcActivityUtcTicks, DateTime.UtcNow.Ticks);
         }
 
         private void EcRestoreCalibrationAuto(int channel)
         {
-            _ecLock.Wait();
-            try
+            ExecuteEc("RestoreCalibrationAuto", ec =>
             {
-                if (_ec == null) throw new InvalidOperationException("EC尚未初始化。");
-                _ec.SetFanAuto(channel);
+                ec.SetFanAuto(channel);
                 // RestoreAllAuto内部会容错吞掉单通道异常；这里显式写两个通道，
                 // 只有对应通道和另一个通道均未抛出时，才允许窗口状态继续变化。
-                _ec.SetFanAuto(channel == 1 ? 2 : 1);
-            }
-            finally { _ecLock.Release(); }
+                ec.SetFanAuto(channel == 1 ? 2 : 1);
+                return true;
+            });
         }
 
         // 异步EC访问版本（用于初始化路径，不阻塞UI线程）
         private async System.Threading.Tasks.Task<int> EcGetCountAsync()
         {
-            await _ecLock.WaitAsync();
-            try { return _ec?.GetFanCount() ?? 2; }
-            finally { _ecLock.Release(); }
+            return await ExecuteEcAsync("GetFanCount", ec => ec.GetFanCount(), CancellationToken.None);
         }
 
         private int EcGetTemperatureC(int fanNumber)
         {
-            _ecLock.Wait();
-            try { return _ec.GetTemperatureC(fanNumber); }
-            finally { _ecLock.Release(); }
+            return ExecuteEc("GetTemperature ch" + fanNumber, ec => ec.GetTemperatureC(fanNumber));
         }
 
         private void PopulateModeCombo()
@@ -165,19 +232,33 @@ namespace X15FanControl
             }
         }
 
-        private void SetRunMode(RunMode requestedMode, string reason)
+        private void SetRunMode(
+            RunMode requestedMode,
+            string reason,
+            bool restoreEc = true,
+            bool stopWatchdog = true)
         {
             if (requestedMode == RunMode.Active)
             {
-                if (_ec == null)
+                if (!IsEcReady())
                 {
                     MessageBox.Show("EC 接口不可用，无法启动活动模式。", "X15 风扇控制", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     requestedMode = RunMode.ReadOnly;
                 }
                 else
                 {
+                    if (_controlCenterLease == null || !_controlCenterLease.IsAcquired)
+                    {
+                        MessageBox.Show(
+                            "Control Center 的频率/风扇控制尚未成功让出，Active 模式不会启动。请查看日志并关闭占用它的组件后重试。",
+                            "Control Center 接管失败",
+                            MessageBoxButtons.OK,
+                            MessageBoxIcon.Warning);
+                        requestedMode = RunMode.ReadOnly;
+                    }
+
                     IList<string> conflicts = ConflictDetector.FindConflicts();
-                    if (conflicts.Count > 0)
+                    if (requestedMode == RunMode.Active && conflicts.Count > 0)
                     {
                         MessageBox.Show(
                             "活动模式被阻止，因为另一个风扇控制进程正在运行：\r\n\r\n" + string.Join("\r\n", conflicts) +
@@ -212,13 +293,33 @@ namespace X15FanControl
             // ReadOnly/Simulation 必须先使验证任务失效，再交还EC
             if (requestedMode != RunMode.Active)
             {
+                StopHeartbeatMonitor();
                 InvalidateVerificationTasks();
-                EcRestoreAllAuto();
-                StopWatchdog();
-                _heartbeat?.WriteStop();
+                bool preserveWatchdogForEcFault = Volatile.Read(ref _ecFaulted) != 0;
+                if (restoreEc && IsEcReady())
+                {
+                    try { EcRestoreAllAuto(); }
+                    catch (Exception exception) { AppendLog("切换只读时恢复自动失败：" + exception.Message); }
+                }
+                else if (!IsEcReady())
+                {
+                    AppendLog("EC不可用，跳过同步恢复自动；独立看门狗负责故障保护。");
+                }
+                if (stopWatchdog && !preserveWatchdogForEcFault)
+                {
+                    StopWatchdog();
+                    _heartbeat?.WriteStop();
+                }
+                else
+                {
+                    _controlCts?.Cancel();
+                    AppendLog("EC熔断后保留看门狗运行，等待心跳过期并恢复自动。");
+                }
             }
 
             _runMode = requestedMode;
+            if (_runMode != RunMode.Active)
+                RestoreAdaptivePowerPolicy();
             lock (_engineLock) { _engine?.Reset(); }
             _modeCombo.SelectedItem = _runMode;
             UpdateModeStatus();
@@ -227,6 +328,8 @@ namespace X15FanControl
             if (_runMode == RunMode.Active)
             {
                 _heartbeat?.WriteActive(Process.GetCurrentProcess().Id);
+                Interlocked.Exchange(ref _watchdogFailureHandling, 0);
+                StartHeartbeatMonitor();
                 StartWatchdog();
             }
 
@@ -298,21 +401,29 @@ namespace X15FanControl
                     continue;
                 }
 
+                Stopwatch cycleStopwatch = Stopwatch.StartNew();
                 try
                 {
-                    if (_closing || _ec == null)
+                    if (_closing || !IsEcReady())
                     {
                         try { await Task.Delay(500, token); } catch { break; }
                         continue;
                     }
 
                     DateTime now = DateTime.UtcNow;
-                    FanSnapshot snapshot = ReadSnapshot(now);
+                    FanSnapshot snapshot = await ReadSnapshotAsync(now, token);
 
                     // 退出检查：ReadSnapshot之后必须确认未请求退出
                     if (_closing || token.IsCancellationRequested) break;
 
                     DetectSensorStalls(snapshot);
+
+                    // Power policy is deliberately independent from the fan
+                    // safety controller. It may request a slower CPU state,
+                    // but temperature emergency stages below still ramp fans
+                    // immediately when needed.
+                    if (!_calibrationActive)
+                        UpdateAdaptivePowerPolicy(snapshot, now);
 
                     ControlDecision decision = null;
 
@@ -333,7 +444,7 @@ namespace X15FanControl
                             BeginInvoke(new Action(() =>
                             {
                                 RestoreAuto("控制器请求自动故障保护");
-                                SetRunMode(RunMode.ReadOnly, "传感器故障保护");
+                                SetRunMode(RunMode.ReadOnly, "传感器故障保护", false);
                             }));
                             try { await Task.Delay(2000, token); } catch { break; }
                             continue;
@@ -347,7 +458,7 @@ namespace X15FanControl
                                 {
                                     if (_runMode != RunMode.Active) return;
                                     RestoreAuto("看门狗异常退出");
-                                    SetRunMode(RunMode.ReadOnly, "看门狗故障保护");
+                                    SetRunMode(RunMode.ReadOnly, "看门狗故障保护", false);
                                 }));
                                 try { await Task.Delay(500, token); } catch { break; }
                                 continue;
@@ -355,7 +466,7 @@ namespace X15FanControl
 
                             // 执行WriteDecision前再次确认非退出状态
                             if (_closing || token.IsCancellationRequested) break;
-                            WriteDecision(decision, now);
+                            await WriteDecisionAsync(decision, snapshot, now, token);
                             _heartbeat?.WriteActive(Process.GetCurrentProcess().Id);
                         }
 
@@ -370,6 +481,7 @@ namespace X15FanControl
                         _lastSnapshot = snapshot;
                     }
                     _lastTickUtc = now;
+                    Interlocked.Exchange(ref _lastControlProgressUtcTicks, now.Ticks);
 
                     // 控制频率由 PollIntervalMs 决定
                     int delayMs = Math.Max(100, Math.Min(2000, _config.PollIntervalMs));
@@ -379,15 +491,28 @@ namespace X15FanControl
                 catch (Exception ex)
                 {
                     AppendLog("后台控制循环错误：" + ex.Message);
+                    bool keepWatchdogForEcFallback = Volatile.Read(ref _ecFaulted) != 0;
                     BeginInvoke(new Action(() =>
                     {
-                        try { RestoreAuto("控制循环异常"); } catch { }
-                        SetRunMode(RunMode.ReadOnly, "异常故障保护");
+                        if (_runMode != RunMode.Active) return;
+                        if (!keepWatchdogForEcFallback)
+                        {
+                            RestoreAuto("控制循环异常");
+                        }
+                        SetRunMode(
+                            RunMode.ReadOnly,
+                            "异常故障保护",
+                            false,
+                            !keepWatchdogForEcFallback);
                     }));
                     try { await Task.Delay(2000, token); } catch { break; }
                 }
                 finally
                 {
+                    if (cycleStopwatch.ElapsedMilliseconds > 5000)
+                    {
+                        AppendLog("控制循环周期过长：" + cycleStopwatch.ElapsedMilliseconds + "ms；已接近看门狗超时阈值。" );
+                    }
                     Interlocked.Exchange(ref _controlLoopGuard, 0);
                 }
             }
@@ -397,7 +522,7 @@ namespace X15FanControl
 
         private void TryAutoActive()
         {
-            if (_ec == null)
+            if (!IsEcReady())
             {
                 AppendLog("自动Active失败：EC未初始化");
                 return;
@@ -433,6 +558,8 @@ namespace X15FanControl
             UpdateModeStatus();
             FlashModeBadge();
             _heartbeat?.WriteActive(Process.GetCurrentProcess().Id);
+            Interlocked.Exchange(ref _watchdogFailureHandling, 0);
+            StartHeartbeatMonitor();
             StartWatchdog();
             AppendLog("已恢复用户保存的 Active 启动模式。");
         }
@@ -464,116 +591,82 @@ namespace X15FanControl
             bool detailedLog = _config.DetailedVerificationLogging;
 
             CancellationTokenSource cts;
+            CancellationTokenSource previousCts = null;
             lock (_verificationLock)
             {
                 if (channel == 1)
                 {
                     _latestCpuVerificationSequence = seqId;
-                    if (_cpuVerificationCts != null)
-                    {
-                        try { _cpuVerificationCts.Cancel(); } catch { }
-                        _cpuVerificationCts.Dispose();
-                    }
+                    previousCts = _cpuVerificationCts;
                     _cpuVerificationCts = new CancellationTokenSource();
                     cts = _cpuVerificationCts;
                 }
                 else
                 {
                     _latestGpuVerificationSequence = seqId;
-                    if (_gpuVerificationCts != null)
-                    {
-                        try { _gpuVerificationCts.Cancel(); } catch { }
-                        _gpuVerificationCts.Dispose();
-                    }
+                    previousCts = _gpuVerificationCts;
                     _gpuVerificationCts = new CancellationTokenSource();
                     cts = _gpuVerificationCts;
                 }
+            }
+
+            // Cancel outside the lock. The queue will skip a request that has
+            // not started yet, while an in-flight native call remains owned by
+            // its worker thread.
+            if (previousCts != null)
+            {
+                try { previousCts.Cancel(); } catch { }
             }
 
             CancellationToken token = cts.Token;
             var stopwatch = Stopwatch.StartNew();
 
             // 在后台线程执行异步验证，不影响控制循环
-            System.Threading.Tasks.Task.Run(async () =>
+            Task verificationTask = System.Threading.Tasks.Task.Run(async () =>
             {
+                bool verificationGateHeld = false;
                 try
                 {
+                    await _verificationEcGate.WaitAsync(token);
+                    verificationGateHeld = true;
+
                     // 检查是否已被取代
                     if (!IsLatestVerification(channel, seqId, token)) return;
 
                     // 50ms回读
                     await System.Threading.Tasks.Task.Delay(50, token);
                     if (!IsLatestVerification(channel, seqId, token)) return;
-                    int duty50 = 0, rpmAt50 = 0;
-                    await _ecLock.WaitAsync();
-                    try
-                    {
-                        duty50 = _ec.ReadRaw(channel).FanDuty;
-                        rpmAt50 = channel == 1 ? _ec.GetCpuRpm() : _ec.GetGpuRpm();
-                    }
-                    finally { _ecLock.Release(); }
+                    int duty50 = 0;
+                    duty50 = (await ExecuteEcAsync("Verify ch" + channel + " ReadRaw 50ms", ec => ec.ReadRaw(channel), token, EcAccessPriority.Verification)).FanDuty;
                     double pct50 = duty50 * 100.0 / 255.0;
                     long delay50 = stopwatch.ElapsedMilliseconds;
-                    if (detailedLog) LogVerification(seqId, channel, "50ms", requestedPercent, duty50, pct50, beforeDuty, delay50, rpmAt50, beforeRpm);
+                    if (detailedLog) LogVerification(seqId, channel, "50ms", requestedPercent, duty50, pct50, beforeDuty, delay50, 0, beforeRpm);
 
                     // 200ms回读
                     await System.Threading.Tasks.Task.Delay(150, token); // 50+150=200
                     if (!IsLatestVerification(channel, seqId, token)) return;
-                    int duty200 = 0, rpmAt200 = 0;
-                    await _ecLock.WaitAsync();
-                    try
-                    {
-                        duty200 = _ec.ReadRaw(channel).FanDuty;
-                        rpmAt200 = channel == 1 ? _ec.GetCpuRpm() : _ec.GetGpuRpm();
-                    }
-                    finally { _ecLock.Release(); }
+                    int duty200 = 0;
+                    duty200 = (await ExecuteEcAsync("Verify ch" + channel + " ReadRaw 200ms", ec => ec.ReadRaw(channel), token, EcAccessPriority.Verification)).FanDuty;
                     double pct200 = duty200 * 100.0 / 255.0;
                     long delay200 = stopwatch.ElapsedMilliseconds;
-                    if (detailedLog) LogVerification(seqId, channel, "200ms", requestedPercent, duty200, pct200, beforeDuty, delay200, rpmAt200, beforeRpm);
+                    if (detailedLog) LogVerification(seqId, channel, "200ms", requestedPercent, duty200, pct200, beforeDuty, delay200, 0, beforeRpm);
 
                     // 1000ms回读 + RPM响应检查
                     await System.Threading.Tasks.Task.Delay(800, token); // 200+800=1000
                     if (!IsLatestVerification(channel, seqId, token)) return;
-                    int duty1000 = 0, rpm1000 = 0;
-                    await _ecLock.WaitAsync();
-                    try
-                    {
-                        duty1000 = _ec.ReadRaw(channel).FanDuty;
-                        rpm1000 = channel == 1 ? _ec.GetCpuRpm() : _ec.GetGpuRpm();
-                    }
-                    finally { _ecLock.Release(); }
+                    int duty1000 = 0;
+                    duty1000 = (await ExecuteEcAsync("Verify ch" + channel + " ReadRaw 1000ms", ec => ec.ReadRaw(channel), token, EcAccessPriority.Verification)).FanDuty;
                     double pct1000 = duty1000 * 100.0 / 255.0;
                     long delay1000 = stopwatch.ElapsedMilliseconds;
-                    if (detailedLog) LogVerification(seqId, channel, "1000ms", requestedPercent, duty1000, pct1000, beforeDuty, delay1000, rpm1000, beforeRpm);
+                    if (detailedLog) LogVerification(seqId, channel, "1000ms", requestedPercent, duty1000, pct1000, beforeDuty, delay1000, 0, beforeRpm);
 
-                    // RPM方向检查
-                    int beforeDutyPct = beforeDuty * 100 / 255;
-                    int expectedDir = requestedPercent - beforeDutyPct;
-                    bool rpmDataValid = beforeRpm > 0 && rpm1000 > 0;
-                    bool rpmDirectionOk = true;
-                    if (rpmDataValid)
-                    {
-                        int rpmDelta = rpm1000 - beforeRpm;
-                        if (Math.Abs(expectedDir) >= 3)
-                        {
-                            if (expectedDir > 0 && rpmDelta < -200)
-                                rpmDirectionOk = false; // 占空比上升但RPM下降
-                            else if (expectedDir < 0 && rpmDelta > 200)
-                                rpmDirectionOk = false; // 占空比下降但RPM上升
-                        }
-                        if (!rpmDirectionOk)
-                            AppendLog($"  [seq={seqId}] RPM方向异常: 占空比变化 {expectedDir:+0;-#}%, RPM变化 {rpmDelta:+0;#0}");
-                    }
-
-                    // 3000ms RPM最终确认
+                    // 3000ms最终占空比确认；RPM读取不参与Active链路。
                     await System.Threading.Tasks.Task.Delay(2000, token); // 1000+2000=3000
                     if (!IsLatestVerification(channel, seqId, token)) return;
-                    int rpm3000 = 0;
-                    await _ecLock.WaitAsync();
-                    try { rpm3000 = channel == 1 ? _ec.GetCpuRpm() : _ec.GetGpuRpm(); }
-                    finally { _ecLock.Release(); }
+                    int duty3000 = (await ExecuteEcAsync("Verify ch" + channel + " ReadRaw 3000ms", ec => ec.ReadRaw(channel), token, EcAccessPriority.Verification)).FanDuty;
                     long delay3000 = stopwatch.ElapsedMilliseconds;
-                    AppendLog($"  [seq={seqId}] [{delay3000}ms] 最终RPM: {rpm3000} (写入前={beforeRpm})");
+                    double pct3000 = duty3000 * 100.0 / 255.0;
+                    AppendLog($"  [seq={seqId}] [{delay3000}ms] 最终EC占空：{duty3000}({pct3000:F1}%) (目标={requestedPercent}%)");
 
                     // 外部覆盖检测：50ms匹配但1000ms被改回
                     if (Math.Abs(pct50 - requestedPercent) <= 2.0 && Math.Abs(pct1000 - requestedPercent) > 3.0)
@@ -587,7 +680,20 @@ namespace X15FanControl
                 {
                     AppendLog($"  [seq={seqId}] 异步验证异常: {ex.Message}");
                 }
+                finally
+                {
+                    if (verificationGateHeld)
+                    {
+                        _verificationEcGate.Release();
+                    }
+                }
             });
+
+            _ = verificationTask.ContinueWith(
+                _ => cts.Dispose(),
+                CancellationToken.None,
+                TaskContinuationOptions.ExecuteSynchronously,
+                TaskScheduler.Default);
         }
 
         // 检查当前验证任务是否仍然是最新的
@@ -607,38 +713,51 @@ namespace X15FanControl
         // 使所有验证任务失效（切换模式、退出、恢复Auto时调用）
         private void InvalidateVerificationTasks()
         {
+            CancellationTokenSource cpuCts;
+            CancellationTokenSource gpuCts;
             lock (_verificationLock)
             {
                 _latestCpuVerificationSequence = -1;
                 _latestGpuVerificationSequence = -1;
-                if (_cpuVerificationCts != null)
-                {
-                    try { _cpuVerificationCts.Cancel(); } catch { }
-                    _cpuVerificationCts.Dispose();
-                    _cpuVerificationCts = null;
-                }
-                if (_gpuVerificationCts != null)
-                {
-                    try { _gpuVerificationCts.Cancel(); } catch { }
-                    _gpuVerificationCts.Dispose();
-                    _gpuVerificationCts = null;
-                }
+                cpuCts = _cpuVerificationCts;
+                gpuCts = _gpuVerificationCts;
+                _cpuVerificationCts = null;
+                _gpuVerificationCts = null;
             }
+
+            // The verification task disposes its own CTS after it exits.  Do
+            // not dispose it while a canceled task may still be in WaitAsync.
+            try { cpuCts?.Cancel(); } catch { }
+            try { gpuCts?.Cancel(); } catch { }
         }
 
         private void LogVerification(int seqId, int ch, string label, int target, int duty, double pct, int beforeDuty, long actualDelayMs, int rpm, int beforeRpm)
         {
             double diff = Math.Abs(pct - target);
             AppendLog(string.Format("  [seq={0}] [{1}] Ch{2} 写入前占空={3}({4:F1}%), 目标={5}%, EC回读={6}({7:F1}%), 差异={8:F1}%, 实际延迟={9}ms, RPM={10}(前{11})",
-                seqId, label, ch, beforeDuty, beforeDuty * 100.0 / 255.0, target, duty, pct, diff, actualDelayMs, rpm, beforeRpm));
+                seqId, label, ch, beforeDuty, beforeDuty * 100.0 / 255.0, target, duty, pct, diff, actualDelayMs,
+                rpm > 0 ? rpm.ToString() : "—", beforeRpm > 0 ? beforeRpm.ToString() : "—"));
         }
 
-        private FanSnapshot ReadSnapshot(DateTime timestampUtc)
+        private async Task<FanSnapshot> ReadSnapshotAsync(DateTime timestampUtc, CancellationToken token)
         {
-            EcData cpuRaw = EcReadRaw(1);
-            EcData gpuRaw = EcReadRaw(2);
-            int gpuDuty = EcGetDuty(2);
-            int cpuDuty = EcGetDuty(1);
+            // Keep one snapshot coherent enough for the controller, but yield
+            // between every native phase so the queue remains observable and
+            // cancellation can stop work that has not started yet.
+            EcData cpuRaw = await ExecuteEcAsync("Snapshot ReadRaw CPU", ec => ec.ReadRaw(1), token);
+            EcData gpuRaw = await ExecuteEcAsync("Snapshot ReadRaw GPU", ec => ec.ReadRaw(2), token);
+            // ReadRaw already contains the duty byte. Reusing it removes two
+            // duplicate native EC transactions from every polling cycle.
+            int cpuDuty = NormalizeDutyPercent(
+                cpuRaw,
+                _lastSnapshot != null ? _lastSnapshot.CpuDutyPercent : 0,
+                ref _cpuZeroDutyReadCount,
+                "CPU");
+            int gpuDuty = NormalizeDutyPercent(
+                gpuRaw,
+                _lastSnapshot != null ? _lastSnapshot.GpuDutyPercent : 0,
+                ref _gpuZeroDutyReadCount,
+                "GPU");
 
             // 从NVIDIA遥测获取真实GPU温度
             _lastGpuTelemetry = _gpuTelemetry?.Latest;
@@ -669,8 +788,13 @@ namespace X15FanControl
                 GpuTemperatureLocalC = gpuRaw.Remote,
                 CpuDutyPercent = cpuDuty,
                 GpuDutyPercent = gpuDuty,
-                CpuRpm = EcGetCpuRpmLocked(),
-                GpuRpm = EcGetGpuRpmLocked(),
+                CpuUtilizationPercent = ReadPerformanceCounterPercent(_cpuUtilizationCounter),
+                CpuPerformancePercent = ReadPerformanceCounterPercent(_cpuPerformanceCounter),
+                // RPM reads are diagnostic-only and can stall the EC DLL.
+                // Active control uses the last startup/probe sample instead
+                // of putting RPM transactions in every control cycle.
+                CpuRpm = _lastCpuRpm,
+                GpuRpm = _lastGpuRpm,
                 GpuTelemetryAvailable = gpuTelemetryOk,
                 GpuTelemetryUtilization = gpuTelemetryOk ? _lastGpuTelemetry.UtilizationPercent : 0,
                 GpuTelemetryPowerWatts = gpuTelemetryOk ? _lastGpuTelemetry.PowerWatts : 0,
@@ -680,30 +804,82 @@ namespace X15FanControl
             };
         }
 
-        private void WriteDecision(ControlDecision decision, DateTime now)
+        private static double ReadPerformanceCounterPercent(PerformanceCounter counter)
+        {
+            if (counter == null)
+                return 0;
+            try
+            {
+                float value = counter.NextValue();
+                if (float.IsNaN(value) || float.IsInfinity(value))
+                    return 0;
+                return Math.Max(0, Math.Min(100, value));
+            }
+            catch
+            {
+                return 0;
+            }
+        }
+
+        private static int ToDutyPercent(byte rawDuty)
+        {
+            return (int)Math.Round(rawDuty * 100.0 / 255.0);
+        }
+
+        private int NormalizeDutyPercent(EcData raw, int previousDutyPercent, ref int zeroReadCount, string channelName)
+        {
+            if (raw.FanDuty != 0)
+            {
+                zeroReadCount = 0;
+                return ToDutyPercent(raw.FanDuty);
+            }
+
+            // A single zero duty byte has been observed from the native EC read
+            // while the fan was demonstrably running. Do not turn that transient
+            // into a false external override or a full-speed write. If it persists
+            // for a second consecutive valid-temperature snapshot, expose zero to
+            // the existing controller/safety logic instead of masking a real fault.
+            if (raw.Remote >= 50 && previousDutyPercent > 0)
+            {
+                zeroReadCount++;
+                if (zeroReadCount == 1)
+                {
+                    AppendLog("EC回读异常：" + channelName + " duty=0，沿用上一帧有效值 " + previousDutyPercent + "%；等待下一次确认");
+                    return previousDutyPercent;
+                }
+            }
+            else
+            {
+                zeroReadCount = 0;
+            }
+
+            return ToDutyPercent(raw.FanDuty);
+        }
+
+        private async Task WriteDecisionAsync(ControlDecision decision, FanSnapshot snapshot, DateTime now, CancellationToken token)
         {
             if (decision.Cpu.ShouldWrite)
             {
-                EcData before = EcReadRaw(1);
-                int beforeRpm = EcGetCpuRpmLocked();
-                EcSetFanPercent(1, decision.Cpu.WritePercent);
+                await ExecuteEcAsync("SetFanPercent CPU", ec =>
+                {
+                    ec.SetFanPercent(1, decision.Cpu.WritePercent);
+                    return true;
+                }, token);
                 lock (_engineLock) { _engine.MarkCpuWritten(decision.Cpu.WritePercent, now); }
-
-                double beforePercent = before.FanDuty * 100.0 / 255.0;
-                if (Math.Abs(decision.Cpu.WritePercent - beforePercent) >= 2.0)
-                    StartWriteVerification(1, decision.Cpu.WritePercent, before.FanDuty, beforeRpm);
+                if (_config.DetailedVerificationLogging)
+                    AppendLog("EC写入完成：CPU=" + decision.Cpu.WritePercent + "%，快照前值=" + snapshot.CpuDutyPercent + "%；由下一次快照确认");
             }
 
             if (decision.Gpu.ShouldWrite)
             {
-                EcData before = EcReadRaw(2);
-                int beforeRpm = EcGetGpuRpmLocked();
-                EcSetFanPercent(2, decision.Gpu.WritePercent);
+                await ExecuteEcAsync("SetFanPercent GPU", ec =>
+                {
+                    ec.SetFanPercent(2, decision.Gpu.WritePercent);
+                    return true;
+                }, token);
                 lock (_engineLock) { _engine.MarkGpuWritten(decision.Gpu.WritePercent, now); }
-
-                double beforePercent = before.FanDuty * 100.0 / 255.0;
-                if (Math.Abs(decision.Gpu.WritePercent - beforePercent) >= 2.0)
-                    StartWriteVerification(2, decision.Gpu.WritePercent, before.FanDuty, beforeRpm);
+                if (_config.DetailedVerificationLogging)
+                    AppendLog("EC写入完成：GPU=" + decision.Gpu.WritePercent + "%，快照前值=" + snapshot.GpuDutyPercent + "%；由下一次快照确认");
             }
         }
 
@@ -803,22 +979,27 @@ namespace X15FanControl
             }
 
             // 硬件状态栏显示EC诊断信息及温升速率
-            string riseRateStr = decision != null && decision.Cpu != null
-                ? string.Format("CPU温升速率: {0:F2}°C/s", decision.Cpu.TemperatureRiseRateCPerSec)
-                : "";
-            _hardwareStatusLabel.Text = string.Format("EC CPU ch1: R={0}°C L={1}°C | EC GPU ch2: R={2}°C L={3}°C | CPU转速={4} GPU转速={5} | {6}",
-                snapshot.CpuTemperatureC > 0 ? snapshot.CpuTemperatureC.ToString() : "—",
-                snapshot.CpuTemperatureLocalC,
-                snapshot.GpuTemperatureLocalC,
-                _lastSnapshot != null ? _lastSnapshot.GpuTemperatureLocalC.ToString() : "—",
-                snapshot.CpuRpm > 0 ? snapshot.CpuRpm.ToString() : "—",
-                snapshot.GpuRpm > 0 ? snapshot.GpuRpm.ToString() : "—",
-                riseRateStr);
+            SetLabelText(_hardwareStatusLabel, "EC CPU ch1: R=");
+            // Keep the fixed labels untouched.  Only the small value labels
+            // change, so the whole green status row no longer flashes on every
+            // dashboard tick.
+            SetLabelText(_cpuEcRemoteStatusValueLabel,
+                snapshot.CpuTemperatureC > 0 ? snapshot.CpuTemperatureC.ToString() : "—");
+            SetLabelText(_cpuEcLocalStatusValueLabel, snapshot.CpuTemperatureLocalC.ToString());
+            SetLabelText(_gpuEcRemoteStatusValueLabel, snapshot.GpuTemperatureLocalC.ToString());
+            SetLabelText(_gpuEcLocalStatusValueLabel,
+                _lastSnapshot != null ? _lastSnapshot.GpuTemperatureLocalC.ToString() : "—");
+            SetLabelText(_cpuRpmStatusValueLabel, snapshot.CpuRpm > 0 ? snapshot.CpuRpm.ToString() : "—");
+            SetLabelText(_gpuRpmStatusValueLabel, snapshot.GpuRpm > 0 ? snapshot.GpuRpm.ToString() : "—");
+            SetLabelText(_temperatureRiseStatusValueLabel,
+                decision != null && decision.Cpu != null
+                    ? decision.Cpu.TemperatureRiseRateCPerSec.ToString("F2")
+                    : "—");
 
             if (_gpuTelemetryReady && _lastGpuTelemetry != null && !_lastGpuTelemetry.IsStale)
-                _hardwareStatusLabel.ForeColor = Color.DarkGreen;
+                SetHardwareStatusColor(Color.DarkGreen);
             else
-                _hardwareStatusLabel.ForeColor = Color.OrangeRed;
+                SetHardwareStatusColor(Color.OrangeRed);
 
             if (decision == null)
             {
@@ -830,6 +1011,7 @@ namespace X15FanControl
 
         private void UpdateDashboardValues(FanSnapshot snapshot, ControlDecision decision)
         {
+            UpdateStrategyStatus(snapshot);
             bool gpuTemperatureAvailable = _gpuTelemetryReady &&
                                            _lastGpuTelemetry != null &&
                                            !_lastGpuTelemetry.IsStale;
@@ -862,11 +1044,91 @@ namespace X15FanControl
                 _gpuTempLabel.ForeColor = gpuTemperatureColor;
         }
 
+        private void UpdateStrategyStatus(FanSnapshot snapshot)
+        {
+            StrategyMode mode = _config == null ? StrategyMode.Auto : _config.StrategyMode;
+            AdaptivePowerTier tier = _adaptiveCurrentTier;
+            AdaptivePowerPreset preset = AdaptivePowerPreset.For(tier);
+            string power = _adaptiveXtuConfirmed || _adaptiveBackendName.StartsWith("Windows", StringComparison.Ordinal)
+                ? "PL1 " + preset.Pl1Watts.ToString("0.#") + "W / PL2 " + preset.Pl2Watts.ToString("0.#") + "W / " + preset.TimeSeconds + "秒"
+                : "等待应用（目标 PL1 " + preset.Pl1Watts.ToString("0.#") + "W / PL2 " + preset.Pl2Watts.ToString("0.#") + "W）";
+            string selected = StrategyModeInfo.GetName(mode);
+            string current = GetCurrentStrategyLevelName(mode, tier);
+            string backend = string.IsNullOrEmpty(_adaptiveBackendName) ? "未应用" : _adaptiveBackendName;
+            SetLabelText(_strategyModeValueLabel, selected);
+            SetLabelText(_strategyTierValueLabel, current);
+            SetLabelText(_strategyPowerValueLabel, power);
+            SetLabelText(_strategyReasonValueLabel, _adaptiveLastReason ?? "等待硬件");
+            SetLabelText(_strategyBackendValueLabel, backend);
+            SetLabelText(_strategyCpuValueLabel, snapshot == null ? "—" : snapshot.CpuUtilizationPercent.ToString("0") + "%");
+            SetLabelText(_strategyGpuValueLabel, snapshot == null ? "—" : snapshot.GpuTelemetryUtilization.ToString("0") + "%");
+            UpdateTrayStrategyStatus();
+        }
+
+        private void UpdateTrayStrategyStatus()
+        {
+            if (_trayStrategyItem == null || _trayTierItem == null || _config == null)
+                return;
+
+            Action update = delegate
+            {
+                if (_trayStrategyItem != null)
+                    _trayStrategyItem.Text = "当前策略：" + StrategyModeInfo.GetName(_config.StrategyMode);
+                if (_trayTierItem != null)
+                    _trayTierItem.Text = "当前档位：" + GetCurrentStrategyLevelName(_config.StrategyMode, _adaptiveCurrentTier);
+
+                foreach (KeyValuePair<StrategyMode, ToolStripMenuItem> entry in _trayStrategyItems)
+                    entry.Value.Checked = false;
+
+                ToolStripMenuItem selectedItem;
+                if (_config.StrategyMode == StrategyMode.Auto)
+                {
+                    if (_trayStrategyItems.TryGetValue(StrategyMode.Auto, out selectedItem))
+                        selectedItem.Checked = true;
+
+                    StrategyMode activeTierMode = StrategyMode.Daily;
+                    if (_adaptiveCurrentTier == AdaptivePowerTier.Code)
+                        activeTierMode = StrategyMode.Code;
+                    else if (_adaptiveCurrentTier == AdaptivePowerTier.Heavy)
+                        activeTierMode = StrategyMode.Heavy;
+
+                    if (_trayStrategyItems.TryGetValue(activeTierMode, out selectedItem))
+                        selectedItem.Checked = true;
+                }
+                else if (_trayStrategyItems.TryGetValue(_config.StrategyMode, out selectedItem))
+                {
+                    selectedItem.Checked = true;
+                }
+            };
+            try
+            {
+                if (IsDisposed || Disposing)
+                    return;
+                if (InvokeRequired)
+                    BeginInvoke(update);
+                else
+                    update();
+            }
+            catch { }
+        }
+
         private static void SetLabelText(Label label, string text)
         {
             if (label != null && label.Text != text)
             {
                 label.Text = text;
+            }
+        }
+
+        private void SetHardwareStatusColor(Color color)
+        {
+            if (_hardwareStatusFlow == null)
+                return;
+
+            foreach (Control control in _hardwareStatusFlow.Controls)
+            {
+                if (control.ForeColor != color)
+                    control.ForeColor = color;
             }
         }
 
@@ -891,7 +1153,7 @@ namespace X15FanControl
         private void RunEcProbe()
         {
             AppendLog("===== EC通道诊断探测开始 =====");
-            if (_ec == null)
+            if (!IsEcReady())
             {
                 AppendLog("EC未初始化，无法探测。");
                 return;
@@ -912,9 +1174,11 @@ namespace X15FanControl
                 }
 
                 // CPU/GPU 转速
+                _lastCpuRpm = EcGetCpuRpmLocked();
+                _lastGpuRpm = EcGetGpuRpmLocked();
                 AppendLog(string.Format("CPU转速: {0}, GPU转速: {1}",
-                    EcGetCpuRpmLocked() > 0 ? EcGetCpuRpmLocked().ToString() : "—",
-                    EcGetGpuRpmLocked() > 0 ? EcGetGpuRpmLocked().ToString() : "—"));
+                    _lastCpuRpm > 0 ? _lastCpuRpm.ToString() : "—",
+                    _lastGpuRpm > 0 ? _lastGpuRpm.ToString() : "—"));
 
                 // 诊断建议
                 EcData ch1 = EcReadRaw(1);
@@ -937,7 +1201,7 @@ namespace X15FanControl
         private async System.Threading.Tasks.Task RunEcProbeAsync()
         {
             AppendLog("===== EC通道诊断探测开始 =====");
-            if (_ec == null)
+            if (!IsEcReady())
             {
                 AppendLog("EC未初始化，无法探测。");
                 return;
@@ -959,6 +1223,8 @@ namespace X15FanControl
 
                 int cpuRpm = await EcGetCpuRpmAsync();
                 int gpuRpm = await EcGetGpuRpmAsync();
+                _lastCpuRpm = cpuRpm;
+                _lastGpuRpm = gpuRpm;
                 AppendLog(string.Format("CPU转速: {0}, GPU转速: {1}",
                     cpuRpm > 0 ? cpuRpm.ToString() : "—",
                     gpuRpm > 0 ? gpuRpm.ToString() : "—"));
@@ -982,23 +1248,17 @@ namespace X15FanControl
 
         private async System.Threading.Tasks.Task<EcData> EcReadRawAsync(int ch)
         {
-            await _ecLock.WaitAsync();
-            try { return _ec == null ? default(EcData) : _ec.ReadRaw(ch); }
-            finally { _ecLock.Release(); }
+            return await ExecuteEcAsync("ReadRaw ch" + ch, ec => ec.ReadRaw(ch), CancellationToken.None);
         }
 
         private async System.Threading.Tasks.Task<int> EcGetCpuRpmAsync()
         {
-            await _ecLock.WaitAsync();
-            try { return _ec?.GetCpuRpm() ?? 0; }
-            finally { _ecLock.Release(); }
+            return await ExecuteEcAsync("GetCpuRpm", ec => ec.GetCpuRpm(), CancellationToken.None);
         }
 
         private async System.Threading.Tasks.Task<int> EcGetGpuRpmAsync()
         {
-            await _ecLock.WaitAsync();
-            try { return _ec?.GetGpuRpm() ?? 0; }
-            finally { _ecLock.Release(); }
+            return await ExecuteEcAsync("GetGpuRpm", ec => ec.GetGpuRpm(), CancellationToken.None);
         }
 
         private void AddHistoryPoint(string seriesName, double value)
@@ -1062,6 +1322,13 @@ namespace X15FanControl
 
         private void RestoreAuto(string reason)
         {
+            if (!IsEcReady())
+            {
+                AppendLog("无法同步恢复自动：EC已不可用。原因：" + reason + "；由独立看门狗负责保护。");
+                InvalidateVerificationTasks();
+                return;
+            }
+
             try
             {
                 EcRestoreAllAuto();
@@ -1072,6 +1339,101 @@ namespace X15FanControl
             {
                 AppendLog("恢复自动失败：" + exception.Message);
             }
+        }
+
+        private void StartHeartbeatMonitor()
+        {
+            if (_heartbeatMonitorTimer != null || _config == null || !_config.LaunchWatchdogInActiveMode)
+            {
+                return;
+            }
+
+            _heartbeatMonitorTimer = new System.Threading.Timer(
+                HeartbeatMonitorTick,
+                null,
+                1000,
+                1000);
+        }
+
+        private void HeartbeatMonitorTick(object state)
+        {
+            if (_closing || _runMode != RunMode.Active || _heartbeat == null)
+            {
+                return;
+            }
+
+            if (HasWatchdogExitedUnexpectedly())
+            {
+                if (Interlocked.Exchange(ref _watchdogFailureHandling, 1) == 0)
+                {
+                    try { BeginInvoke(new Action(HandleWatchdogFailure)); }
+                    catch { }
+                }
+                return;
+            }
+
+            long progressTicks = Interlocked.Read(ref _lastControlProgressUtcTicks);
+            long ecActivityTicks = Interlocked.Read(ref _lastEcActivityUtcTicks);
+            if (ecActivityTicks > progressTicks)
+            {
+                progressTicks = ecActivityTicks;
+            }
+            if (progressTicks <= 0)
+            {
+                return;
+            }
+
+            double progressAgeSeconds = (DateTime.UtcNow.Ticks - progressTicks) /
+                                        (double)TimeSpan.TicksPerSecond;
+            // A slow cycle can contain several successful EC calls. Treat
+            // each completed call as progress, but stop publishing if a
+            // single EC operation or control-loop wait really stalls.
+            if (progressAgeSeconds > 5)
+            {
+                return;
+            }
+
+            try
+            {
+                _heartbeat.WriteActive(Process.GetCurrentProcess().Id);
+            }
+            catch (Exception exception)
+            {
+                AppendLog("心跳发布失败：" + exception.Message);
+            }
+        }
+
+        private void StopHeartbeatMonitor()
+        {
+            System.Threading.Timer timer = _heartbeatMonitorTimer;
+            _heartbeatMonitorTimer = null;
+            if (timer != null)
+            {
+                try { timer.Dispose(); } catch { }
+            }
+        }
+
+        private void HandleWatchdogFailure()
+        {
+            if (_closing || _runMode != RunMode.Active)
+            {
+                return;
+            }
+
+            // The independent watchdog has already restored EC Auto. Do not
+            // wait for the EC worker here: the control loop may be inside a
+            // stalled native call. Make the UI and future writes safe now.
+            _runMode = RunMode.ReadOnly;
+            StopHeartbeatMonitor();
+            InvalidateVerificationTasks();
+            _controlCts?.Cancel();
+            try { _heartbeat?.WriteStop(); } catch { }
+            try { StopWatchdog(); } catch { }
+            if (_modeCombo != null) _modeCombo.SelectedItem = _runMode;
+            UpdateModeStatus();
+            FlashModeBadge();
+            AppendLog("风扇已由独立看门狗恢复自动。原因：看门狗异常退出。");
+            AppendLog("运行模式切换为 ReadOnly。原因：看门狗故障保护。");
         }
 
         private void StartWatchdog()
@@ -1157,6 +1519,55 @@ namespace X15FanControl
                     _watchdogProcess.Dispose();
                     _watchdogProcess = null;
                 }
+            }
+        }
+
+        private void StartControlCenterLeaseWatchdog()
+        {
+            if (_controlCenterLeaseWatchdogProcess != null)
+            {
+                try { if (!_controlCenterLeaseWatchdogProcess.HasExited) return; } catch { }
+                try { _controlCenterLeaseWatchdogProcess.Dispose(); } catch { }
+                _controlCenterLeaseWatchdogProcess = null;
+            }
+
+            string watchdogExe = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "X15FanWatchdog.exe");
+            string leasePath = Path.Combine(_dataDirectory, "controlcenter.lease.json");
+            if (!File.Exists(watchdogExe) || !File.Exists(leasePath))
+            {
+                AppendLog("Control Center 接管看门狗未部署，未启用服务接管。");
+                return;
+            }
+
+            ProcessStartInfo startInfo = new ProcessStartInfo
+            {
+                FileName = watchdogExe,
+                Arguments = "--lease-only --parent " + Process.GetCurrentProcess().Id +
+                             " --lease \"" + leasePath + "\" --log \"" + _watchdogLogPath + "\"",
+                UseShellExecute = false,
+                CreateNoWindow = true,
+                WindowStyle = ProcessWindowStyle.Hidden
+            };
+            _controlCenterLeaseWatchdogProcess = Process.Start(startInfo);
+            AppendLog("Control Center 接管看门狗已启动，PID " +
+                      (_controlCenterLeaseWatchdogProcess == null ? 0 : _controlCenterLeaseWatchdogProcess.Id) + "。");
+        }
+
+        private void StopControlCenterLeaseWatchdog()
+        {
+            try
+            {
+                if (_controlCenterLeaseWatchdogProcess != null && !_controlCenterLeaseWatchdogProcess.HasExited)
+                {
+                    if (!_controlCenterLeaseWatchdogProcess.WaitForExit(1500))
+                        _controlCenterLeaseWatchdogProcess.Kill();
+                }
+            }
+            catch { }
+            finally
+            {
+                try { _controlCenterLeaseWatchdogProcess?.Dispose(); } catch { }
+                _controlCenterLeaseWatchdogProcess = null;
             }
         }
 
@@ -1320,12 +1731,13 @@ namespace X15FanControl
                             try
                             {
                                 DisposeEc();
+                                Interlocked.Exchange(ref _ecFaulted, 0);
                                 string dllPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ClevoEcInfo.dll");
-                                _ecLock.Wait();
-                                try { _ec = new ClevoEcInfo(dllPath); }
-                                finally { _ecLock.Release(); }
+                                _ecQueue = new EcAccessQueue(dllPath);
+                                if (!_ecQueue.Ready.Wait(10000) || !_ecQueue.IsReady)
+                                    throw new TimeoutException("EC worker initialization timed out after resume.");
                             }
-                            catch { }
+                            catch (Exception ex) { AppendLog("恢复后EC初始化失败：" + ex.Message); }
                         });
 
                         lock (_engineLock) { _engine?.Reset(); }
@@ -1366,6 +1778,7 @@ namespace X15FanControl
             _closing = true;
             _mainTimer.Stop();
             _runMode = RunMode.ReadOnly;
+            StopHeartbeatMonitor();
 
             AppendLog("Control loop cancellation requested");
             _controlCts?.Cancel();
@@ -1388,6 +1801,8 @@ namespace X15FanControl
             else
                 AppendLog("Control loop stop timeout — proceeding with cleanup");
 
+            try { RestoreAdaptivePowerPolicy(); } catch (Exception exception) { AppendLog("恢复自适应功耗方案失败：" + exception.Message); }
+
             // 使验证任务失效
             InvalidateVerificationTasks();
 
@@ -1398,6 +1813,13 @@ namespace X15FanControl
 
             // 停止附加服务
             try { StopWatchdog(); } catch { }
+            try { StopControlCenterLeaseWatchdog(); } catch { }
+            if (_controlCenterLease != null)
+            {
+                string controlCenterDiagnostic;
+                bool restored = _controlCenterLease.Release(out controlCenterDiagnostic);
+                AppendLog((restored ? "Control Center 已恢复：" : "Control Center 恢复失败：") + controlCenterDiagnostic);
+            }
             try { _heartbeat?.WriteStop(); } catch { }
 
             // 停止GPU遥测
@@ -1442,16 +1864,17 @@ namespace X15FanControl
 
         private void DisposeEc()
         {
-            if (_ec != null)
+            EcAccessQueue queue = _ecQueue;
+            _ecQueue = null;
+            if (queue != null)
             {
                 try
                 {
-                    _ec.Dispose();
+                    queue.Dispose();
                 }
                 catch
                 {
                 }
-                _ec = null;
             }
         }
 

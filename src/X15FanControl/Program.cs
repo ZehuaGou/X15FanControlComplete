@@ -115,6 +115,8 @@ namespace X15FanControl
                                 return verifier.RunNormalUseActive(15);
                             if (cliArgs[0] == "--verify-gpu-calibration")
                                 return verifier.RunGpuCalibration();
+                            if (cliArgs[0] == "--measure-operating-point")
+                                return verifier.RunOperatingPointCalibration();
                             if (cliArgs[0] == "--verify-gpu-active")
                                 return verifier.RunGpuActive(15);
                         }

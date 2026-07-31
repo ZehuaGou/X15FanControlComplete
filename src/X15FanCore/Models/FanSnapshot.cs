@@ -8,6 +8,8 @@ namespace X15FanCore.Models
         public int GpuTemperatureLocalC { get; set; }
         public int CpuDutyPercent { get; set; }
         public int GpuDutyPercent { get; set; }
+        public double CpuUtilizationPercent { get; set; }
+        public double CpuPerformancePercent { get; set; }
         public int CpuRpm { get; set; }
         public int GpuRpm { get; set; }
         public bool GpuTelemetryAvailable { get; set; }

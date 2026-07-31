@@ -89,12 +89,12 @@ used again. A saved Active preference is restored only after the EC, process
 conflict, and GPU telemetry safety checks pass. Temporary safety fallbacks do
 not overwrite the saved preference.
 
-## Default profiles
+## Fixed strategies
 
-All values are editable in the Profiles & curves tab.
+The top strategy dropdown contains four built-in choices: **Auto**, **Quiet**, **Code**, and **Heavy**. Power limits, dwell times and safety fan curves are fixed in the program; the UI does not expose editable wattage or curve controls.
 
-### 静音稳定－平衡 (default)
-The default recommended profile for daily use.
+### Auto (default)
+The controller starts in the Daily/Quiet tier, moves to Code after 30 seconds of sustained moderate load, and moves to Heavy after another 30 seconds of sustained high load. It returns downward only after 120 seconds of sustained lower load. This hysteresis avoids fan and performance oscillation.
 
 - **CPU stable zone:** 50–55%, hold at 53%
 - **CPU curve:** 40°C→5%, 50°C→15%, 60°C→35%, 70°C→52%, 80°C→54%, 85°C→66%, 90°C→90%, 93°C→100%
@@ -105,22 +105,18 @@ The default recommended profile for daily use.
 - **Emergency:** Stage 1 at 87°C→75%, Stage 2 at 90°C→90%, Stage 3 at 93°C→100%
 - **GPU stable zone:** 48–54%, hold at 50%
 
-### 静音稳定－低噪
-Lower stable-platform hold point (52%) for users more sensitive to fan noise.
+### Quiet
+Fixed quiet tier: 25/35 W PL1/PL2, 28-second window, Windows CPU performance ceiling 75%.
 
-### 极致静音
-Prioritises silence over aggressive cooling:
-- ≤35% fan duty below 60°C
-- Very slow ramp up (1.0%/s) and down (0.3%/s)
-- 20-second down-hold delay
-- Higher emergency thresholds (Stage 1 at 90°C)
-- Suitable for light workloads (browsing, office, video playback)
+### Code
+Fixed development tier: 38/55 W PL1/PL2, 28-second window, Windows CPU performance ceiling 95%.
 
-### 当前 Brz 曲线
-Reproduces the original Brz temperature/power curves with added smoothing and safety.
+### Heavy
+Fixed heavy-load tier: 55/69 W PL1/PL2, 28-second window, Windows CPU performance ceiling 100%.
 
-### 性能模式
-Earlier cooling and higher steady airflow for sustained heavy load. CPU/GPU cross-fan assistance enabled.
+## Adaptive power policy
+
+The Active mode policy uses the three fixed tiers above. Control Center DCHU writes are accepted only after a successful write and readback. If the OEM component is unavailable, the program keeps the reversible Windows fallback and reports that state in the dashboard; it never claims that a wattage write succeeded without confirmation.
 
 ## License
 

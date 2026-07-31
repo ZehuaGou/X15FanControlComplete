@@ -42,8 +42,9 @@ namespace X15FanControl
         private readonly object _latestLock = new object();
         private int _controlLoopGuard;
 
-        private ClevoEcInfo _ec;
-        private readonly System.Threading.SemaphoreSlim _ecLock = new System.Threading.SemaphoreSlim(1, 1);
+        private EcAccessQueue _ecQueue;
+        // CPU and GPU verification share the same physical EC access path.
+        private readonly System.Threading.SemaphoreSlim _verificationEcGate = new System.Threading.SemaphoreSlim(1, 1);
         // Write verification (async via Task.Delay)
         private int _ecSequenceId;
         private int _latestCpuVerificationSequence;
@@ -56,10 +57,23 @@ namespace X15FanControl
         private FanControlEngine _engine;
         private CsvLogger _csvLogger;
         private Heartbeat _heartbeat;
+        private System.Threading.Timer _heartbeatMonitorTimer;
         private Process _watchdogProcess;
+        private Process _controlCenterLeaseWatchdogProcess;
+        private ControlCenterLease _controlCenterLease;
         private RunMode _runMode;
         private NotifyIcon _notifyIcon;
         private DateTime _lastTickUtc;
+        private long _lastControlProgressUtcTicks;
+        // Updated after each completed native EC operation.  A full control
+        // cycle can legitimately span several EC calls on this notebook.
+        private long _lastEcActivityUtcTicks;
+        private int _lastCpuRpm;
+        private int _lastGpuRpm;
+        private int _cpuZeroDutyReadCount;
+        private int _gpuZeroDutyReadCount;
+        private int _ecFaulted;
+        private int _watchdogFailureHandling;
         private bool _closing;
         private bool _allowFinalClose;
 
@@ -69,6 +83,10 @@ namespace X15FanControl
         private bool _startMinimizedToTray;
         private bool _isAutoStart;
         private ToolStripMenuItem _trayModeItem;
+        private ToolStripMenuItem _trayStrategyItem;
+        private ToolStripMenuItem _trayTierItem;
+        private readonly Dictionary<StrategyMode, ToolStripMenuItem> _trayStrategyItems =
+            new Dictionary<StrategyMode, ToolStripMenuItem>();
         private ToolStripMenuItem _startupMenuItem;
 
         // Async logging
@@ -92,11 +110,34 @@ namespace X15FanControl
         private GpuTelemetryData _lastGpuTelemetry;
         private int _gpuTelemetryValidSamples;
         private bool _gpuTelemetryReady;
+        private PerformanceCounter _cpuUtilizationCounter;
+        private PerformanceCounter _cpuPerformanceCounter;
+        private AdaptivePowerTierController _adaptivePowerTierController;
+        private AdaptivePowerTier _adaptiveAppliedTier = (AdaptivePowerTier)(-1);
+        private AdaptivePowerTier _adaptiveCurrentTier = AdaptivePowerTier.Daily;
+        private bool _adaptiveXtuConfirmed;
+        private bool _adaptivePowerApplying;
+        private bool _adaptivePolicyCaptured;
+        private string _adaptiveLastReason = "等待硬件初始化";
+        private string _adaptiveBackendName = "未应用";
+        private AdaptivePowerTier _adaptiveFanAppliedTier = (AdaptivePowerTier)(-1);
+        private WindowsProcessorPolicy _adaptiveProcessorPolicy;
+        private WindowsProcessorPolicySnapshot _adaptivePolicySnapshot;
+        private DateTime _adaptiveNextApplyUtc = DateTime.MinValue;
+        private System.Threading.CancellationTokenSource _adaptiveApplyCts;
+        private Task _adaptiveApplyTask;
         private Label _gpuNvidiaUtilLabel;
         private Label _gpuNvidiaPowerLabel;
         private Label _gpuNvidiaPStateLabel;
         private Label _gpuNvidiaSourceLabel;
         private Label _gpuNvidiaStatusLabel;
+        private Label _strategyModeValueLabel;
+        private Label _strategyTierValueLabel;
+        private Label _strategyPowerValueLabel;
+        private Label _strategyReasonValueLabel;
+        private Label _strategyBackendValueLabel;
+        private Label _strategyCpuValueLabel;
+        private Label _strategyGpuValueLabel;
 
         // Write verification (async via Task.Delay)
                 private ComboBox _modeCombo;
@@ -104,6 +145,14 @@ namespace X15FanControl
         private Button _applyModeButton;
         private Button _restoreAutoButton;
         private Label _hardwareStatusLabel;
+        private FlowLayoutPanel _hardwareStatusFlow;
+        private Label _cpuEcRemoteStatusValueLabel;
+        private Label _cpuEcLocalStatusValueLabel;
+        private Label _gpuEcRemoteStatusValueLabel;
+        private Label _gpuEcLocalStatusValueLabel;
+        private Label _cpuRpmStatusValueLabel;
+        private Label _gpuRpmStatusValueLabel;
+        private Label _temperatureRiseStatusValueLabel;
     private Label _modeStatusLabel;
     private Panel _modeStatusPanel;
     private Label _cpuTempLabel;
@@ -121,15 +170,7 @@ namespace X15FanControl
         private Chart _cpuHistoryChart;
         private Chart _gpuHistoryChart;
         private TextBox _logTextBox;
-        private PropertyGrid _profilePropertyGrid;
-        private PropertyGrid _cpuPropertyGrid;
-        private PropertyGrid _gpuPropertyGrid;
-        private DataGridView _cpuCurveGrid;
-        private DataGridView _gpuCurveGrid;
-        private BindingList<FanCurvePoint> _cpuCurveBinding;
-        private BindingList<FanCurvePoint> _gpuCurveBinding;
-        private Button _saveProfileButton;
-        private Button _reloadProfileButton;
+        private TabControl _mainTabs;
 
         private ComboBox _calibrationFanCombo;
         private NumericUpDown _calibrationStart;
@@ -211,10 +252,23 @@ namespace X15FanControl
                 AppendLog(_configStore.LastLoadDiagnostic);
             }
             _heartbeat = new Heartbeat(_heartbeatPath);
+            _controlCenterLease = new ControlCenterLease(Path.Combine(_dataDirectory, "controlcenter.lease.json"));
+            string controlCenterDiagnostic;
+            if (_controlCenterLease.Acquire(out controlCenterDiagnostic))
+            {
+                AppendLog(controlCenterDiagnostic);
+                StartControlCenterLeaseWatchdog();
+            }
+            else
+            {
+                AppendLog(controlCenterDiagnostic);
+                _controlCenterLease = null;
+            }
+            _adaptivePowerTierController = new AdaptivePowerTierController();
+            InitializeAdaptivePowerCounters();
 
             PopulateModeCombo();
             PopulateProfiles();
-
             FanProfile profile = GetActiveProfile();
             _engine = new FanControlEngine(profile);
             LoadProfileIntoEditor(profile);
@@ -294,14 +348,11 @@ namespace X15FanControl
                     try
                     {
                         DisposeEc();
+                        System.Threading.Interlocked.Exchange(ref _ecFaulted, 0);
                         string dllPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ClevoEcInfo.dll");
-                        _ecLock.Wait();
-                        try
-                        {
-                            _ec = new ClevoEcInfo(dllPath);
-                        }
-                        finally { _ecLock.Release(); }
-                        return true;
+                        _ecQueue = new EcAccessQueue(dllPath);
+                        _ecQueue.Ready.Wait(10000);
+                        return _ecQueue.IsReady;
                     }
                     catch { return false; }
                 });
@@ -318,6 +369,7 @@ namespace X15FanControl
                 }
                 else
                 {
+                    DisposeEc();
                     Invoke(new Action(() =>
                     {
                         _hardwareStatusLabel.Text = "硬件：EC初始化失败";
@@ -328,6 +380,7 @@ namespace X15FanControl
             }
             catch (Exception ex)
             {
+                DisposeEc();
                 Invoke(new Action(() =>
                 {
                     _hardwareStatusLabel.Text = "硬件初始化异常：" + ex.Message;
@@ -391,6 +444,8 @@ namespace X15FanControl
                 AppendLog("GPU遥测15秒内未收到数据，标记为不可用");
             }
 
+            await ProbeIntelXtuBridgeAsync();
+
             // 4. 启动UI刷新定时器（不再负责硬件控制）
             Invoke(new Action(() =>
             {
@@ -406,6 +461,97 @@ namespace X15FanControl
                        "，GPU遥测=" + (telemetryReceived ? "就绪" : "不可用"));
         }
 
+        private async Task ProbeIntelXtuBridgeAsync()
+        {
+            string bridgePath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "X15XtuBridge.exe");
+            if (!File.Exists(bridgePath))
+            {
+                AppendLog("Intel XTU 桥接程序未部署，跳过功耗通道探测。");
+                return;
+            }
+
+            Process bridge = null;
+            try
+            {
+                bridge = new Process
+                {
+                    StartInfo = new ProcessStartInfo
+                    {
+                        FileName = bridgePath,
+                        WorkingDirectory = Path.GetDirectoryName(bridgePath),
+                        UseShellExecute = false,
+                        CreateNoWindow = true,
+                        RedirectStandardOutput = true,
+                        RedirectStandardError = true,
+                        StandardOutputEncoding = Encoding.UTF8,
+                        StandardErrorEncoding = Encoding.UTF8
+                    }
+                };
+                if (!bridge.Start())
+                {
+                    AppendLog("Intel XTU 桥接程序启动失败。");
+                    return;
+                }
+
+                Task<string> outputTask = bridge.StandardOutput.ReadToEndAsync();
+                Task<string> errorTask = bridge.StandardError.ReadToEndAsync();
+                Task waitTask = Task.Run(() => bridge.WaitForExit());
+                if (await Task.WhenAny(waitTask, Task.Delay(15000)) != waitTask)
+                {
+                    try { bridge.Kill(); } catch { }
+                    AppendLog("Intel XTU 桥接程序超时，已终止；未执行任何功耗写入。");
+                    return;
+                }
+
+                string output = await outputTask;
+                string error = await errorTask;
+                foreach (string line in output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    AppendLog("Intel XTU 桥接：" + line);
+                }
+                foreach (string line in error.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
+                {
+                    AppendLog("Intel XTU 桥接错误：" + line);
+                }
+                AppendLog("Intel XTU 桥接退出码：" + bridge.ExitCode + "（当前仅探测，不写入功耗）");
+            }
+            catch (Exception exception)
+            {
+                AppendLog("Intel XTU 桥接探测跳过：" + exception.Message);
+            }
+            finally
+            {
+                if (bridge != null)
+                {
+                    bridge.Dispose();
+                }
+            }
+        }
+
+        private void InitializeAdaptivePowerCounters()
+        {
+            try
+            {
+                _cpuUtilizationCounter = new PerformanceCounter("Processor", "% Processor Time", "_Total", true);
+                _cpuUtilizationCounter.NextValue();
+            }
+            catch (Exception exception)
+            {
+                _cpuUtilizationCounter = null;
+                AppendLog("自适应功耗：CPU利用率计数器不可用，将使用温度/EC活动作为保守输入。" + exception.Message);
+            }
+
+            try
+            {
+                _cpuPerformanceCounter = new PerformanceCounter("Processor Information", "% Processor Performance", "_Total", true);
+                _cpuPerformanceCounter.NextValue();
+            }
+            catch
+            {
+                _cpuPerformanceCounter = null;
+            }
+        }
+
         private void BuildTrayIcon()
         {
             ContextMenuStrip menu = new ContextMenuStrip();
@@ -413,6 +559,19 @@ namespace X15FanControl
 
             _trayModeItem = new ToolStripMenuItem("当前模式：只读") { Enabled = false };
             menu.Items.Add(_trayModeItem);
+
+            _trayStrategyItem = new ToolStripMenuItem("当前策略：自动策略") { Enabled = false };
+            _trayTierItem = new ToolStripMenuItem("当前档位：2档 · 日常") { Enabled = false };
+            menu.Items.Add(_trayStrategyItem);
+            menu.Items.Add(_trayTierItem);
+
+            menu.Items.Add(new ToolStripSeparator());
+            _trayStrategyItems.Clear();
+            AddTrayStrategyItem(menu, StrategyMode.Auto, "切换到自动策略");
+            AddTrayStrategyItem(menu, StrategyMode.Quiet, "切换到1档 · 安静");
+            AddTrayStrategyItem(menu, StrategyMode.Daily, "切换到2档 · 日常");
+            AddTrayStrategyItem(menu, StrategyMode.Code, "切换到3档 · 代码");
+            AddTrayStrategyItem(menu, StrategyMode.Heavy, "切换到4档 · 重负载");
 
             menu.Items.Add("恢复原厂自动", null, delegate { RestoreAuto("Tray command"); });
 
@@ -433,6 +592,14 @@ namespace X15FanControl
                 ContextMenuStrip = menu
             };
             _notifyIcon.DoubleClick += delegate { ShowFromTray(); };
+        }
+
+        private void AddTrayStrategyItem(ContextMenuStrip menu, StrategyMode mode, string text)
+        {
+            ToolStripMenuItem item = new ToolStripMenuItem(text);
+            item.Click += delegate { SelectStrategyFromTray(mode); };
+            _trayStrategyItems[mode] = item;
+            menu.Items.Add(item);
         }
 
         private void ShowFromTray()
@@ -629,7 +796,7 @@ namespace X15FanControl
         private void BuildUserInterface()
         {
             Panel header = BuildHeader();
-            TabControl tabs = new TabControl
+            _mainTabs = new TabControl
             {
                 Dock = DockStyle.Fill,
                 DrawMode = TabDrawMode.OwnerDrawFixed,
@@ -638,13 +805,13 @@ namespace X15FanControl
                 Padding = new Point(16, 6),
                 Font = new Font("Segoe UI Semibold", 9.5F)
             };
-            tabs.DrawItem += MainTabsDrawItem;
-            tabs.TabPages.Add(BuildDashboardTab());
-            tabs.TabPages.Add(BuildProfilesTab());
-            tabs.TabPages.Add(BuildCalibrationTab());
-            tabs.TabPages.Add(BuildLogsTab());
+            _mainTabs.DrawItem += MainTabsDrawItem;
+            _mainTabs.TabPages.Add(BuildDashboardTab());
+            _mainTabs.TabPages.Add(BuildProfilesTab());
+            _mainTabs.TabPages.Add(BuildCalibrationTab());
+            _mainTabs.TabPages.Add(BuildLogsTab());
 
-            Controls.Add(tabs);
+            Controls.Add(_mainTabs);
             Controls.Add(header);
         }
 
@@ -710,6 +877,9 @@ namespace X15FanControl
             Button ecProbeButton = new Button { Text = "EC诊断", Width = 68, Height = 31 };
             StyleButton(ecProbeButton, Color.FromArgb(225, 247, 250), Color.FromArgb(0, 91, 104));
             ecProbeButton.Click += delegate { RunEcProbe(); };
+            Button strategyStatusButton = new Button { Text = "策略状态", Width = 78, Height = 31 };
+            StyleButton(strategyStatusButton, Color.FromArgb(255, 235, 205), Color.FromArgb(115, 70, 0));
+            strategyStatusButton.Click += delegate { if (_mainTabs != null) _mainTabs.SelectedIndex = 0; };
             _modeStatusPanel = new Panel
             {
                 Width = 58,
@@ -747,6 +917,7 @@ namespace X15FanControl
             actions.Controls.Add(_applyModeButton);
             actions.Controls.Add(_restoreAutoButton);
             actions.Controls.Add(ecProbeButton);
+            actions.Controls.Add(strategyStatusButton);
             actions.Controls.Add(_modeStatusPanel);
 
             layout.Controls.Add(brand, 0, 0);
@@ -804,11 +975,12 @@ namespace X15FanControl
             {
                 Dock = DockStyle.Fill,
                 ColumnCount = 1,
-                RowCount = 2,
+                RowCount = 3,
                 Padding = new Padding(12),
                 BackColor = UiBackground
             };
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
             root.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
 
             TableLayoutPanel cards = new TableLayoutPanel
@@ -850,7 +1022,31 @@ namespace X15FanControl
             };
             statusPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
             statusPanel.RowStyles.Add(new RowStyle(SizeType.Percent, 50));
-            _hardwareStatusLabel = new Label { Dock = DockStyle.Fill, TextAlign = ContentAlignment.MiddleLeft, Text = "硬件：初始化中…" };
+            _hardwareStatusFlow = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                AutoScroll = false,
+                Margin = new Padding(0),
+                Padding = new Padding(0),
+                BackColor = UiSurface
+            };
+            _hardwareStatusLabel = AddHardwareStatusText(_hardwareStatusFlow, "EC CPU ch1: R=");
+            _cpuEcRemoteStatusValueLabel = AddHardwareStatusValue(_hardwareStatusFlow, 34);
+            AddHardwareStatusText(_hardwareStatusFlow, "°C L=");
+            _cpuEcLocalStatusValueLabel = AddHardwareStatusValue(_hardwareStatusFlow, 34);
+            AddHardwareStatusText(_hardwareStatusFlow, "°C | EC GPU ch2: R=");
+            _gpuEcRemoteStatusValueLabel = AddHardwareStatusValue(_hardwareStatusFlow, 34);
+            AddHardwareStatusText(_hardwareStatusFlow, "°C L=");
+            _gpuEcLocalStatusValueLabel = AddHardwareStatusValue(_hardwareStatusFlow, 34);
+            AddHardwareStatusText(_hardwareStatusFlow, "°C | CPU转速=");
+            _cpuRpmStatusValueLabel = AddHardwareStatusValue(_hardwareStatusFlow, 48);
+            AddHardwareStatusText(_hardwareStatusFlow, " GPU转速=");
+            _gpuRpmStatusValueLabel = AddHardwareStatusValue(_hardwareStatusFlow, 48);
+            AddHardwareStatusText(_hardwareStatusFlow, " | CPU温升速率: ");
+            _temperatureRiseStatusValueLabel = AddHardwareStatusValue(_hardwareStatusFlow, 66);
+            AddHardwareStatusText(_hardwareStatusFlow, "°C/s");
 
             FlowLayoutPanel telemetryPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight };
             telemetryPanel.Controls.Add(new Label { Text = "GPU遥测: ", AutoSize = true, ForeColor = Color.DimGray });
@@ -869,13 +1065,135 @@ namespace X15FanControl
             _gpuNvidiaPStateLabel = new Label { Text = "—", AutoSize = true };
             telemetryPanel.Controls.Add(_gpuNvidiaPStateLabel);
 
-            statusPanel.Controls.Add(_hardwareStatusLabel, 0, 0);
+            statusPanel.Controls.Add(_hardwareStatusFlow, 0, 0);
             statusPanel.Controls.Add(telemetryPanel, 0, 1);
 
             root.Controls.Add(cards, 0, 0);
-            root.Controls.Add(statusPanel, 0, 1);
+            root.Controls.Add(BuildStrategyStatusPanel(), 0, 1);
+            root.Controls.Add(statusPanel, 0, 2);
             tab.Controls.Add(root);
             return tab;
+        }
+
+        private Panel BuildStrategyStatusPanel()
+        {
+            Panel panel = new Panel
+            {
+                Dock = DockStyle.Fill,
+                BackColor = UiSurface,
+                Padding = new Padding(12, 4, 12, 4),
+                Margin = new Padding(0, 6, 0, 0)
+            };
+            FlowLayoutPanel primary = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Top,
+                Height = 24,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                BackColor = UiSurface,
+                Margin = Padding.Empty,
+                Padding = Padding.Empty
+            };
+            primary.Controls.Add(CreateStrategyFixedLabel("策略：", 44, true));
+            _strategyModeValueLabel = CreateStrategyValueLabel(92, true);
+            primary.Controls.Add(_strategyModeValueLabel);
+            primary.Controls.Add(CreateStrategyFixedLabel("当前档位：", 70, true));
+            _strategyTierValueLabel = CreateStrategyValueLabel(105, true);
+            primary.Controls.Add(_strategyTierValueLabel);
+            primary.Controls.Add(CreateStrategyFixedLabel("功耗：", 44, true));
+            _strategyPowerValueLabel = CreateStrategyValueLabel(260, true);
+            primary.Controls.Add(_strategyPowerValueLabel);
+
+            FlowLayoutPanel secondary = new FlowLayoutPanel
+            {
+                Dock = DockStyle.Fill,
+                FlowDirection = FlowDirection.LeftToRight,
+                WrapContents = false,
+                BackColor = UiSurface,
+                Margin = Padding.Empty,
+                Padding = Padding.Empty
+            };
+            secondary.Controls.Add(CreateStrategyFixedLabel("原因：", 44, false));
+            _strategyReasonValueLabel = CreateStrategyValueLabel(315, false);
+            secondary.Controls.Add(_strategyReasonValueLabel);
+            secondary.Controls.Add(CreateStrategyFixedLabel("后端：", 44, false));
+            _strategyBackendValueLabel = CreateStrategyValueLabel(155, false);
+            secondary.Controls.Add(_strategyBackendValueLabel);
+            secondary.Controls.Add(CreateStrategyFixedLabel("CPU：", 38, false));
+            _strategyCpuValueLabel = CreateStrategyValueLabel(48, false);
+            secondary.Controls.Add(_strategyCpuValueLabel);
+            secondary.Controls.Add(CreateStrategyFixedLabel("GPU：", 38, false));
+            _strategyGpuValueLabel = CreateStrategyValueLabel(48, false);
+            secondary.Controls.Add(_strategyGpuValueLabel);
+
+            panel.Controls.Add(secondary);
+            panel.Controls.Add(primary);
+            return panel;
+        }
+
+        private static Label CreateStrategyFixedLabel(string text, int width, bool prominent)
+        {
+            return new Label
+            {
+                Text = text,
+                Width = width,
+                Height = 22,
+                AutoSize = false,
+                ForeColor = prominent ? UiText : UiMuted,
+                Font = new Font("Segoe UI", prominent ? 9.5F : 9F),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = Padding.Empty,
+                Padding = Padding.Empty
+            };
+        }
+
+        private static Label CreateStrategyValueLabel(int width, bool prominent)
+        {
+            return new Label
+            {
+                Width = width,
+                Height = 22,
+                AutoSize = false,
+                ForeColor = prominent ? UiCpuAccent : UiMuted,
+                Font = new Font("Segoe UI Semibold", prominent ? 9.5F : 9F),
+                TextAlign = ContentAlignment.MiddleLeft,
+                Margin = Padding.Empty,
+                Padding = Padding.Empty,
+                Text = "—",
+                AutoEllipsis = true
+            };
+        }
+
+        private static Label AddHardwareStatusText(FlowLayoutPanel panel, string text)
+        {
+            Label label = new Label
+            {
+                AutoSize = true,
+                Text = text,
+                ForeColor = Color.DarkGreen,
+                Margin = new Padding(0),
+                Padding = new Padding(0),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            panel.Controls.Add(label);
+            return label;
+        }
+
+        private static Label AddHardwareStatusValue(FlowLayoutPanel panel, int width)
+        {
+            Label label = new Label
+            {
+                AutoSize = false,
+                Width = width,
+                Height = 22,
+                Text = "—",
+                ForeColor = Color.DarkGreen,
+                Margin = new Padding(0),
+                Padding = new Padding(0),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            panel.Controls.Add(label);
+            return label;
         }
 
         private GroupBox BuildFanDashboardCard(

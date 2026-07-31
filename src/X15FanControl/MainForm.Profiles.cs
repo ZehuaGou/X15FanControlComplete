@@ -1,8 +1,5 @@
 using System;
-using System.Collections.Generic;
-using System.ComponentModel;
 using System.Drawing;
-using System.Linq;
 using System.Windows.Forms;
 using X15FanCore.Control;
 using X15FanCore.Models;
@@ -11,336 +8,209 @@ namespace X15FanControl
 {
     public partial class MainForm
     {
+        private sealed class StrategyOption
+        {
+            public StrategyMode Mode { get; set; }
+            public string Name { get { return StrategyModeInfo.GetName(Mode); } }
+            public override string ToString() { return Name; }
+        }
+
         private TabPage BuildProfilesTab()
         {
-            TabPage tab = new TabPage("配置与曲线") { BackColor = UiBackground };
-            TableLayoutPanel root = new TableLayoutPanel
+            TabPage tab = new TabPage("策略说明") { BackColor = UiBackground };
+            Panel root = new Panel
             {
                 Dock = DockStyle.Fill,
-                ColumnCount = 2,
-                RowCount = 2,
-                Padding = new Padding(12),
+                Padding = new Padding(16),
                 BackColor = UiBackground
             };
-            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            root.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
-            root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 54));
-
-            Panel cpuEditor = BuildProfileEditorCard(
-                "CPU 曲线与控制参数", UiCpuAccent,
-                out _cpuCurveGrid, out _cpuPropertyGrid);
-            cpuEditor.Margin = new Padding(0, 0, 6, 0);
-            Panel gpuEditor = BuildProfileEditorCard(
-                "GPU 曲线与控制参数", UiGpuAccent,
-                out _gpuCurveGrid, out _gpuPropertyGrid);
-            gpuEditor.Margin = new Padding(6, 0, 0, 0);
-
-            Panel footer = new Panel
+            TableLayoutPanel layout = new TableLayoutPanel
             {
-                Dock = DockStyle.Fill,
+                Dock = DockStyle.Top,
+                Height = 510,
+                ColumnCount = 1,
+                RowCount = 7,
                 BackColor = UiSurface,
-                Margin = new Padding(0, 8, 0, 0),
-                Padding = new Padding(10, 4, 10, 4)
+                Padding = new Padding(18)
             };
-            _profilePropertyGrid = new PropertyGrid { Visible = false };
-            _saveProfileButton = new Button { Text = "保存配置", Width = 112, Height = 32 };
-            StyleButton(_saveProfileButton, UiCpuAccent, Color.White);
-            _saveProfileButton.Margin = new Padding(4, 1, 4, 0);
-            _saveProfileButton.Click += SaveProfileButtonClick;
-            _reloadProfileButton = new Button { Text = "重新加载", Width = 96, Height = 32 };
-            StyleButton(_reloadProfileButton, Color.FromArgb(232, 237, 244), UiText);
-            _reloadProfileButton.Margin = new Padding(4, 1, 4, 0);
-            _reloadProfileButton.Click += delegate { LoadProfileIntoEditor(GetActiveProfile()); };
-            Button profileSettingsButton = new Button { Text = "配置设置", Width = 102, Height = 32 };
-            StyleButton(profileSettingsButton, Color.FromArgb(232, 237, 244), UiText);
-            profileSettingsButton.Margin = new Padding(4, 1, 4, 0);
-            profileSettingsButton.Click += delegate { ShowProfileSettingsDialog(); };
-            Label note = new Label
-            {
-                Dock = DockStyle.Fill,
-                TextAlign = ContentAlignment.MiddleRight,
-                ForeColor = UiMuted,
-                Padding = new Padding(0, 0, 8, 0),
-                Text = "活动模式使用已保存的配置。曲线温度必须从上到下递增。"
-            };
-            FlowLayoutPanel footerActions = new FlowLayoutPanel
-            {
-                Dock = DockStyle.Left,
-                AutoSize = true,
-                WrapContents = false,
-                FlowDirection = FlowDirection.LeftToRight,
-                BackColor = UiSurface
-            };
-            footerActions.Controls.Add(_saveProfileButton);
-            footerActions.Controls.Add(_reloadProfileButton);
-            footerActions.Controls.Add(profileSettingsButton);
-            footer.Controls.Add(note);
-            footer.Controls.Add(footerActions);
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 48));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
+            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
+            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
 
-            root.Controls.Add(cpuEditor, 0, 0);
-            root.Controls.Add(gpuEditor, 1, 0);
-            root.Controls.Add(footer, 0, 1);
-            root.SetColumnSpan(footer, 2);
+            Label title = new Label
+            {
+                Text = "固定策略（不可手工修改）",
+                Dock = DockStyle.Fill,
+                ForeColor = UiText,
+                Font = new Font("Segoe UI Semibold", 13F),
+                TextAlign = ContentAlignment.MiddleLeft
+            };
+            layout.Controls.Add(title, 0, 0);
+            layout.Controls.Add(new Label
+            {
+                Text = "顶部下拉框只负责选择策略。功耗、CPU性能上限、风扇曲线和自动升降档时间均由程序内置并经过边界限制，页面不提供数值编辑入口。",
+                Dock = DockStyle.Fill,
+                ForeColor = UiMuted,
+                TextAlign = ContentAlignment.MiddleLeft,
+                AutoEllipsis = true
+            }, 0, 1);
+
+            layout.Controls.Add(BuildStrategyRow("自动策略", "自动使用2档作为低负载起点；持续负载30秒升到下一档，低负载持续120秒回落。"), 0, 2);
+            layout.Controls.Add(BuildStrategyRow("1档 · 安静", "25W / 35W / 28秒，CPU性能上限75%，风扇曲线最安静；高温安全爬升不受影响。"), 0, 3);
+            layout.Controls.Add(BuildStrategyRow("2档 · 日常", "30W / 45W / 28秒，CPU性能上限85%，日常阅读、办公和轻量代码使用。"), 0, 4);
+            layout.Controls.Add(BuildStrategyRow("3档 · 代码", "38W / 55W / 28秒，CPU性能上限95%，适合编译和持续代码任务。"), 0, 5);
+            layout.Controls.Add(BuildStrategyRow("4档 · 重负载", "55W / 69W / 28秒，CPU性能上限100%，适合持续高负载任务。"), 0, 6);
+
+            root.Controls.Add(layout);
             tab.Controls.Add(root);
             return tab;
         }
 
-        private Panel BuildProfileEditorCard(
-            string title,
-            Color accentColor,
-            out DataGridView curveGrid,
-            out PropertyGrid propertyGrid)
+        private static Control BuildStrategyRow(string name, string description)
         {
-            Panel card = new Panel
+            Panel row = new Panel { Dock = DockStyle.Fill, BackColor = Color.FromArgb(247, 249, 252), Padding = new Padding(12, 6, 12, 6) };
+            Label nameLabel = new Label
             {
-                Dock = DockStyle.Fill,
-                BackColor = UiSurface,
-                Padding = new Padding(12, 10, 12, 12)
+                Text = name,
+                Dock = DockStyle.Left,
+                Width = 150,
+                ForeColor = UiCpuAccent,
+                Font = new Font("Segoe UI Semibold", 10.5F),
+                TextAlign = ContentAlignment.MiddleLeft
             };
-            TableLayoutPanel layout = new TableLayoutPanel
+            Label detail = new Label
             {
+                Text = description,
                 Dock = DockStyle.Fill,
-                ColumnCount = 1,
-                RowCount = 3,
-                BackColor = UiSurface
-            };
-            layout.RowStyles.Add(new RowStyle(SizeType.Absolute, 42));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 44));
-            layout.RowStyles.Add(new RowStyle(SizeType.Percent, 56));
-
-            Panel header = new Panel { Dock = DockStyle.Fill, BackColor = UiSurface };
-            header.Controls.Add(new Label
-            {
-                Text = title,
-                Dock = DockStyle.Fill,
-                TextAlign = ContentAlignment.MiddleLeft,
-                Padding = new Padding(12, 0, 0, 0),
                 ForeColor = UiText,
-                Font = new Font("Segoe UI Semibold", 11F)
-            });
-            header.Controls.Add(new Panel { Dock = DockStyle.Left, Width = 4, BackColor = accentColor });
-
-            curveGrid = BuildCurveGrid(accentColor);
-            propertyGrid = BuildPropertyGrid();
-            layout.Controls.Add(header, 0, 0);
-            layout.Controls.Add(BuildEditorSection("风扇曲线", curveGrid), 0, 1);
-            layout.Controls.Add(BuildEditorSection("控制参数", propertyGrid), 0, 2);
-            card.Controls.Add(layout);
-            return card;
-        }
-
-        private static Panel BuildEditorSection(string title, Control content)
-        {
-            Panel section = new Panel
-            {
-                Dock = DockStyle.Fill,
-                Padding = new Padding(0, 0, 0, 4),
-                Margin = new Padding(4),
-                BackColor = UiSurface
-            };
-            section.Controls.Add(content);
-            section.Controls.Add(new Label
-            {
-                Text = title,
-                Dock = DockStyle.Top,
-                Height = 28,
                 TextAlign = ContentAlignment.MiddleLeft,
-                ForeColor = UiMuted,
-                Font = new Font("Segoe UI Semibold", 9F)
-            });
-            return section;
-        }
-
-        private static DataGridView BuildCurveGrid(Color accentColor)
-        {
-            DataGridView grid = new DataGridView
-            {
-                Dock = DockStyle.Fill,
-                AutoGenerateColumns = false,
-                AllowUserToAddRows = true,
-                AllowUserToDeleteRows = true,
-                RowHeadersVisible = false,
-                SelectionMode = DataGridViewSelectionMode.FullRowSelect,
-                BorderStyle = BorderStyle.None,
-                BackgroundColor = UiSurface,
-                GridColor = UiBorder,
-                RowTemplate = { Height = 32 },
-                ColumnHeadersHeight = 36,
-                ColumnHeadersHeightSizeMode = DataGridViewColumnHeadersHeightSizeMode.DisableResizing,
-                EnableHeadersVisualStyles = false
+                AutoEllipsis = true
             };
-            grid.ColumnHeadersDefaultCellStyle.BackColor = Color.FromArgb(239, 243, 248);
-            grid.ColumnHeadersDefaultCellStyle.ForeColor = UiText;
-            grid.ColumnHeadersDefaultCellStyle.Font = new Font("Segoe UI Semibold", 9F);
-            grid.ColumnHeadersDefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
-            grid.DefaultCellStyle.BackColor = UiSurface;
-            grid.DefaultCellStyle.ForeColor = UiText;
-            grid.DefaultCellStyle.SelectionBackColor = Color.FromArgb(
-                Math.Min(255, accentColor.R + 175),
-                Math.Min(255, accentColor.G + 125),
-                Math.Min(255, accentColor.B + 20));
-            grid.DefaultCellStyle.SelectionForeColor = UiText;
-            grid.DefaultCellStyle.Alignment = DataGridViewContentAlignment.MiddleCenter;
-            grid.AlternatingRowsDefaultCellStyle.BackColor = Color.FromArgb(248, 250, 252);
-            grid.Columns.Add(new DataGridViewTextBoxColumn
-            {
-                DataPropertyName = "TemperatureC",
-                HeaderText = "温度 °C",
-                AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill
-            });
-            grid.Columns.Add(new DataGridViewTextBoxColumn
-            {
-                DataPropertyName = "PowerPercent",
-                HeaderText = "风扇功率 %",
-                AutoSizeMode = DataGridViewAutoSizeColumnMode.Fill
-            });
-            return grid;
-        }
-
-        private static PropertyGrid BuildPropertyGrid()
-        {
-            return new PropertyGrid
-            {
-                Dock = DockStyle.Fill,
-                HelpVisible = false,
-                ToolbarVisible = false,
-                PropertySort = PropertySort.Categorized,
-                BackColor = UiSurface,
-                ViewBackColor = UiSurface,
-                ViewForeColor = UiText,
-                LineColor = UiBorder,
-                CategoryForeColor = UiText
-            };
+            row.Controls.Add(detail);
+            row.Controls.Add(nameLabel);
+            return row;
         }
 
         private void PopulateProfiles()
         {
             _profileCombo.Items.Clear();
-            foreach (FanProfile profile in _config.Profiles)
-            {
-                _profileCombo.Items.Add(profile);
-            }
+            _profileCombo.Items.Add(new StrategyOption { Mode = StrategyMode.Auto });
+            _profileCombo.Items.Add(new StrategyOption { Mode = StrategyMode.Quiet });
+            _profileCombo.Items.Add(new StrategyOption { Mode = StrategyMode.Daily });
+            _profileCombo.Items.Add(new StrategyOption { Mode = StrategyMode.Code });
+            _profileCombo.Items.Add(new StrategyOption { Mode = StrategyMode.Heavy });
 
-            FanProfile active = GetActiveProfile();
-            _profileCombo.SelectedItem = active;
-            if (_profileCombo.SelectedIndex < 0 && _profileCombo.Items.Count > 0)
+            StrategyMode mode = _config == null ? StrategyMode.Auto : _config.StrategyMode;
+            for (int index = 0; index < _profileCombo.Items.Count; index++)
             {
-                _profileCombo.SelectedIndex = 0;
+                StrategyOption option = _profileCombo.Items[index] as StrategyOption;
+                if (option != null && option.Mode == mode)
+                {
+                    _profileCombo.SelectedIndex = index;
+                    break;
+                }
             }
         }
 
         private FanProfile GetActiveProfile()
         {
-            FanProfile profile = _config.Profiles.FirstOrDefault(item => string.Equals(item.Name, _config.ActiveProfileName, StringComparison.OrdinalIgnoreCase));
-            if (profile == null)
-            {
-                profile = _config.Profiles.First();
-                _config.ActiveProfileName = profile.Name;
-            }
+            StrategyMode mode = _config == null ? StrategyMode.Auto : _config.StrategyMode;
+            AdaptivePowerTier tier = GetTierForMode(mode);
+            return CreateFixedFanProfile(mode, tier);
+        }
 
-            return profile;
+        private static AdaptivePowerTier GetTierForMode(StrategyMode mode)
+        {
+            switch (mode)
+            {
+                case StrategyMode.Quiet: return AdaptivePowerTier.Quiet;
+                case StrategyMode.Code: return AdaptivePowerTier.Code;
+                case StrategyMode.Heavy: return AdaptivePowerTier.Heavy;
+                default: return AdaptivePowerTier.Daily;
+            }
+        }
+
+        private static FanProfile CreateFixedFanProfile(StrategyMode mode, AdaptivePowerTier tier)
+        {
+            if (tier == AdaptivePowerTier.Heavy || mode == StrategyMode.Heavy)
+                return DefaultProfiles.CreatePerformanceProfile();
+            if (mode == StrategyMode.Quiet)
+                return DefaultProfiles.CreateQuietProfile();
+            if (tier == AdaptivePowerTier.Code || mode == StrategyMode.Code)
+                return DefaultProfiles.CreateBalancedProfile();
+            return DefaultProfiles.CreateBalancedProfile();
+        }
+
+        private static string GetCurrentStrategyLevelName(StrategyMode selectedMode, AdaptivePowerTier tier)
+        {
+            if (selectedMode == StrategyMode.Quiet)
+                return "1档 · 安静";
+            switch (tier)
+            {
+                case AdaptivePowerTier.Code: return "3档 · 代码";
+                case AdaptivePowerTier.Heavy: return "4档 · 重负载";
+                default: return "2档 · 日常";
+            }
+        }
+
+        private void ApplyFixedFanProfile(AdaptivePowerTier tier)
+        {
+            StrategyMode mode = _config == null ? StrategyMode.Auto : _config.StrategyMode;
+            FanProfile profile = CreateFixedFanProfile(mode, tier);
+            lock (_engineLock)
+            {
+                if (_engine != null)
+                {
+                    _engine.SetProfile(profile);
+                    _engine.Reset();
+                }
+            }
         }
 
         private void ProfileComboSelectedIndexChanged(object sender, EventArgs e)
         {
-            FanProfile selected = _profileCombo.SelectedItem as FanProfile;
+            StrategyOption selected = _profileCombo.SelectedItem as StrategyOption;
             if (selected == null || _config == null)
-            {
                 return;
-            }
 
+            _config.StrategyMode = selected.Mode;
             _config.ActiveProfileName = selected.Name;
-            lock (_engineLock) { _engine?.SetProfile(selected); _engine?.Reset(); }
-            LoadProfileIntoEditor(selected);
+            AdaptivePowerTier selectedTier = GetTierForMode(selected.Mode);
+            _adaptivePowerTierController?.ForceTier(selectedTier, "用户选择固定策略");
+            _adaptiveCurrentTier = selectedTier;
+            _adaptiveAppliedTier = (AdaptivePowerTier)(-1);
+            _adaptiveXtuConfirmed = false;
+            _adaptiveLastReason = "用户选择" + selected.Name + "策略，等待应用";
+            ApplyFixedFanProfile(selectedTier);
+            UpdateTrayStrategyStatus();
             SaveConfig();
-            AppendLog("已选择配置：" + selected.Name);
+            AppendLog("已选择固定策略：" + selected.Name + "；功耗和风扇参数由内置策略管理");
+        }
+
+        private void SelectStrategyFromTray(StrategyMode mode)
+        {
+            if (_profileCombo == null)
+                return;
+            for (int index = 0; index < _profileCombo.Items.Count; index++)
+            {
+                StrategyOption option = _profileCombo.Items[index] as StrategyOption;
+                if (option != null && option.Mode == mode)
+                {
+                    _profileCombo.SelectedIndex = index;
+                    return;
+                }
+            }
         }
 
         private void LoadProfileIntoEditor(FanProfile profile)
         {
-            if (profile == null || _cpuCurveGrid == null)
-            {
-                return;
-            }
-
-            _cpuCurveBinding = new BindingList<FanCurvePoint>(profile.Cpu.Curve.Select(point => new FanCurvePoint(point.TemperatureC, point.PowerPercent)).ToList());
-            _gpuCurveBinding = new BindingList<FanCurvePoint>(profile.Gpu.Curve.Select(point => new FanCurvePoint(point.TemperatureC, point.PowerPercent)).ToList());
-            _cpuCurveGrid.DataSource = _cpuCurveBinding;
-            _gpuCurveGrid.DataSource = _gpuCurveBinding;
-            _cpuPropertyGrid.SelectedObject = profile.Cpu;
-            _gpuPropertyGrid.SelectedObject = profile.Gpu;
-            _profilePropertyGrid.SelectedObject = profile;
-        }
-
-        private void ShowProfileSettingsDialog()
-        {
-            FanProfile profile = GetActiveProfile();
-            using (Form dialog = new Form())
-            {
-                dialog.Text = "配置设置 — " + profile.Name;
-                dialog.StartPosition = FormStartPosition.CenterParent;
-                dialog.Size = new System.Drawing.Size(520, 620);
-                PropertyGrid grid = new PropertyGrid { Dock = DockStyle.Fill, SelectedObject = profile, HelpVisible = true };
-                Button save = new Button { Text = "保存", Dock = DockStyle.Bottom, Height = 38 };
-                save.Click += delegate
-                {
-                    _config.ActiveProfileName = profile.Name;
-                    _configStore.Save(_config);
-                    lock (_engineLock) { _engine.SetProfile(profile); }
-                    PopulateProfiles();
-                    dialog.DialogResult = DialogResult.OK;
-                    dialog.Close();
-                };
-                dialog.Controls.Add(grid);
-                dialog.Controls.Add(save);
-                dialog.ShowDialog(this);
-            }
-        }
-
-        private void SaveProfileButtonClick(object sender, EventArgs e)
-        {
-            try
-            {
-                _cpuCurveGrid.EndEdit();
-                _gpuCurveGrid.EndEdit();
-                FanProfile profile = GetActiveProfile();
-                profile.Cpu.Curve = ValidateAndNormalizeCurve(_cpuCurveBinding, "CPU");
-                profile.Gpu.Curve = ValidateAndNormalizeCurve(_gpuCurveBinding, "GPU");
-                _configStore.Save(_config);
-                lock (_engineLock) { _engine.SetProfile(profile); _engine.Reset(); }
-                LoadProfileIntoEditor(profile);
-                AppendLog("已保存配置：" + profile.Name);
-                MessageBox.Show("配置已保存。", "X15 风扇控制", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            }
-            catch (Exception exception)
-            {
-                MessageBox.Show(exception.Message, "配置验证错误", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            }
-        }
-
-        private static List<FanCurvePoint> ValidateAndNormalizeCurve(IEnumerable<FanCurvePoint> source, string name)
-        {
-            List<FanCurvePoint> curve = FanCurve.Normalize(source == null ? null : source.ToList());
-            if (curve.Count < 2)
-            {
-                throw new InvalidOperationException(name + " 曲线至少需要两个点。");
-            }
-
-            for (int index = 1; index < curve.Count; index++)
-            {
-                if (curve[index].TemperatureC <= curve[index - 1].TemperatureC)
-                {
-                    throw new InvalidOperationException(name + " 曲线温度必须严格递增。");
-                }
-
-                if (curve[index].PowerPercent < curve[index - 1].PowerPercent)
-                {
-                    throw new InvalidOperationException(name + " 风扇功率不应随温度升高而降低。");
-                }
-            }
-
-            return curve;
+            // The former curve/property editors were intentionally removed.
+            // Keeping this no-op preserves calibration call sites without
+            // exposing writable fan or power parameters to the user.
         }
     }
 }
