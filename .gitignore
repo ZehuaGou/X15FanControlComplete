@@ -11,6 +11,14 @@ dist/
 packages/
 .codegraph/
 *.tmp
+samples/
+config/
+
+# Old development reports (not for public repo)
+CRITICAL_FIX_REPORT.md
+PROJECT_STATUS.md
+launch-gui.ps1
+run-test.ps1
 
 # Third-party binary: user must copy from Brz installation
 vendor/ClevoEcInfo.dll
