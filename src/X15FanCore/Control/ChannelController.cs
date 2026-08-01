@@ -44,6 +44,7 @@ namespace X15FanCore.Control
         {
             _profile = profile ?? throw new ArgumentNullException("profile");
             _filter.Configure(profile.FilterWindowSamples, profile.FastEmaAlpha, profile.SlowEmaAlpha);
+            UpdateStableZoneThresholds();
         }
 
         public void Reset()
@@ -65,8 +66,21 @@ namespace X15FanCore.Control
             _lastWriteVerificationTarget = -1;
             _pendingWriteVerification = false;
             _inStableZone = false;
-            _stableZoneEntryPercent = 51;
-            _stableZoneExitPercent = 49;
+            UpdateStableZoneThresholds();
+        }
+
+        // The stable zone hysteresis band must be derived from the profile's
+        // zone, not hardcoded.  The previous fixed 51%/49% thresholds silently
+        // disabled the stable zone for every profile whose zone maximum was
+        // below 51% (e.g. the Daily profile's 45-50% CPU / 43-50% GPU zones).
+        // For the Code profile (50-55%) this reproduces the historical 51/49
+        // band exactly, keeping existing behavior unchanged.
+        private void UpdateStableZoneThresholds()
+        {
+            double zoneMinimum = Math.Min(_profile.StableZoneMinimumPercent, _profile.StableZoneMaximumPercent);
+            double zoneMaximum = Math.Max(_profile.StableZoneMinimumPercent, _profile.StableZoneMaximumPercent);
+            _stableZoneEntryPercent = Math.Max(0, Math.Min(zoneMinimum + 1, zoneMaximum));
+            _stableZoneExitPercent = Math.Max(0, zoneMinimum - 1);
         }
 
         public ChannelDecision Update(
@@ -142,8 +156,8 @@ namespace X15FanCore.Control
             }
 
             bool emergencyStage3 = instantTemperatureC >= _profile.EmergencyStage3TemperatureC && _profile.EmergencyStage3TemperatureC > 0;
-            bool emergencyStage2 = instantTemperatureC >= _profile.EmergencyStage2TemperatureC;
-            bool emergencyStage1 = instantTemperatureC >= _profile.EmergencyStage1TemperatureC;
+            bool emergencyStage2 = instantTemperatureC >= _profile.EmergencyStage2TemperatureC && _profile.EmergencyStage2TemperatureC > 0;
+            bool emergencyStage1 = instantTemperatureC >= _profile.EmergencyStage1TemperatureC && _profile.EmergencyStage1TemperatureC > 0;
 
             if (emergencyStage3)
             {
@@ -241,27 +255,12 @@ namespace X15FanCore.Control
 
         public void SetEcReadback(double readbackPercent)
         {
+            // Store the latest verified readback for diagnostics only.  All
+            // mismatch counting lives in CheckExternalOverride, which is the
+            // single owner of the override state machine; counting in two
+            // places inflated _consecutiveMismatchCount and made the override
+            // threshold fire early.
             _ecLastReadbackPercent = readbackPercent;
-
-            if (!_initialized || _lastWritten < 0)
-            {
-                _consecutiveMismatchCount = 0;
-                return;
-            }
-
-            double diff = Math.Abs(readbackPercent - _lastWritten);
-
-            // Only count as mismatch when there's a significant discrepancy
-            if (diff > 3.0)
-            {
-                _consecutiveMismatchCount++;
-            }
-            else
-            {
-                // Decrement counter when consistent, but don't reset immediately
-                if (_consecutiveMismatchCount > 0)
-                    _consecutiveMismatchCount--;
-            }
         }
 
         public int ConsecutiveMismatchCount => _consecutiveMismatchCount;

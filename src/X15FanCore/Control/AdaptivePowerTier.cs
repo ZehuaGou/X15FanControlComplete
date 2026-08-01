@@ -30,21 +30,41 @@ namespace X15FanCore.Control
     /// </summary>
     public sealed class AdaptivePowerTierController
     {
-        public const double DailyToCodeCpuPercent = 35;
-        public const double CodeToHeavyCpuPercent = 70;
-        public const double DailyToCodeGpuPercent = 30;
-        public const double CodeToHeavyGpuPercent = 60;
-        public const double QuietToDailyCpuPercent = 18;
-        public const double QuietToDailyGpuPercent = 15;
-        public const double DailyToQuietCpuAveragePercent = 10;
-        public const double DailyToQuietGpuAveragePercent = 8;
+        // Load thresholds calibrated against a 23-hour real usage trace
+        // (84,139 one-second samples, 2026-07-31/08-01): CPU utilization sits
+        // in 0-5% (7%), 5-10% (22%), 10-15% (22%), 15-20% (20%), 20-35%
+        // (25%), 35-50% (4%), 50%+ (0.6%).  The previous thresholds (35/70
+        // upshift) made the Code tier the de-facto ceiling and the Heavy
+        // tier unreachable in automatic mode.  GPU utilization is almost
+        // never below 5% (desktop compositing holds it near 10%), so quiet
+        // tier gating must treat that as idle.
+        public const double DailyToCodeCpuPercent = 25;
+        public const double CodeToHeavyCpuPercent = 50;
+        public const double DailyToCodeGpuPercent = 20;
+        public const double CodeToHeavyGpuPercent = 40;
+        public const double QuietToDailyCpuPercent = 12;
+        public const double QuietToDailyGpuPercent = 10;
+        public const double DailyToQuietCpuAveragePercent = 8;
+        public const double DailyToQuietGpuAveragePercent = 15;
 
         // Downshift uses averages with hysteresis instead of the instantaneous
-        // 15%/10% test used by the previous implementation.
-        public const double CodeToDailyCpuAveragePercent = 25;
-        public const double CodeToDailyGpuAveragePercent = 18;
-        public const double HeavyToCodeCpuAveragePercent = 40;
-        public const double HeavyToCodeGpuAveragePercent = 30;
+        // 15%/10% test used by the previous implementation.  Hysteresis bands
+        // relative to the upshift gates above: quiet 4%, daily 10%, code 25%.
+        public const double CodeToDailyCpuAveragePercent = 15;
+        public const double CodeToDailyGpuAveragePercent = 12;
+        public const double HeavyToCodeCpuAveragePercent = 25;
+        public const double HeavyToCodeGpuAveragePercent = 20;
+
+        // Recent-peak gates for downshift: a load spike inside the 15-second
+        // peak window cancels an otherwise eligible downshift.  Scaled to the
+        // upshift gates above (a tier may only drop once sustained load is
+        // clearly below the upshift evidence).
+        public const int QuietDownshiftMaxCpuPeakPercent = 30;
+        public const int QuietDownshiftMaxGpuPeakPercent = 30;
+        public const int CodeDownshiftMaxCpuPeakPercent = 40;
+        public const int CodeDownshiftMaxGpuPeakPercent = 30;
+        public const int HeavyDownshiftMaxCpuPeakPercent = 60;
+        public const int HeavyDownshiftMaxGpuPeakPercent = 50;
 
         public const int QuietToDailyDwellSeconds = 10;
         public const int DailyToCodeDwellSeconds = 15;
@@ -56,6 +76,18 @@ namespace X15FanCore.Control
         public const int UpshiftEvidenceWindowSeconds = 8;
         public const int DownshiftAverageWindowSeconds = 30;
         public const int RecentPeakWindowSeconds = 15;
+
+        // Game fast-track: strong evidence (sustained GPU >= 70% or CPU >= 80%)
+        // means a game is opening and the machine needs performance headroom
+        // immediately.  The normal evidence window (8s) plus dwell (10-15s)
+        // plus the 20s minimum tier hold used to leave a game stuck on the
+        // Daily tier (30W PL1 / 85% CPU ceiling) for 30-45 seconds, which
+        // reads as stutter at load time.  Strong evidence pierces the minimum
+        // hold and compresses the upshift dwell to 3 seconds; downshifts keep
+        // their long dwells so the tier cannot flap after the game exits.
+        public const double StrongUpshiftEvidenceCpuPercent = 80;
+        public const double StrongUpshiftEvidenceGpuPercent = 70;
+        public const int StrongUpshiftDwellSeconds = 3;
 
         private const double QuietMaximumCpuTemperatureC = 85;
         private const double QuietMaximumGpuTemperatureC = 75;
@@ -156,26 +188,28 @@ namespace X15FanCore.Control
                                   (upshift.GpuKnown && upshift.AverageGpu >= CodeToHeavyGpuPercent);
             bool dailyEvidence = upshift.AverageCpu >= QuietToDailyCpuPercent ||
                                  (upshift.GpuKnown && upshift.AverageGpu >= QuietToDailyGpuPercent);
+            bool strongEvidence = upshift.AverageCpu >= StrongUpshiftEvidenceCpuPercent ||
+                                  (upshift.GpuKnown && upshift.AverageGpu >= StrongUpshiftEvidenceGpuPercent);
             bool dailyToQuiet = average.TemperaturesKnown && quietThermalSafe &&
                                 average.AverageCpu <= DailyToQuietCpuAveragePercent &&
                                 average.GpuKnown && average.AverageGpu <= DailyToQuietGpuAveragePercent &&
-                                recent.MaximumCpu < 30 &&
-                                recent.GpuKnown && recent.MaximumGpu < 25;
+                                recent.MaximumCpu < QuietDownshiftMaxCpuPeakPercent &&
+                                recent.GpuKnown && recent.MaximumGpu < QuietDownshiftMaxGpuPeakPercent;
             bool codeToDaily =
                                average.AverageCpu <= CodeToDailyCpuAveragePercent &&
                                 average.GpuKnown && average.AverageGpu <= CodeToDailyGpuAveragePercent &&
-                               recent.MaximumCpu < 60 &&
-                               recent.GpuKnown && recent.MaximumGpu < 45;
+                               recent.MaximumCpu < CodeDownshiftMaxCpuPeakPercent &&
+                               recent.GpuKnown && recent.MaximumGpu < CodeDownshiftMaxGpuPeakPercent;
             bool heavyToCode =
                                average.AverageCpu <= HeavyToCodeCpuAveragePercent &&
                                average.GpuKnown && average.AverageGpu <= HeavyToCodeGpuAveragePercent &&
-                               recent.MaximumCpu < 85 &&
-                               recent.MaximumGpu < 75;
+                               recent.MaximumCpu < HeavyDownshiftMaxCpuPeakPercent &&
+                               recent.MaximumGpu < HeavyDownshiftMaxGpuPeakPercent;
 
             if (_currentTier == AdaptivePowerTier.Quiet)
             {
                 if (dailyEvidence)
-                    return ConsiderTransition(AdaptivePowerTier.Daily, now, true, "负载持续升高，准备进入日常档", upshift);
+                    return ConsiderTransition(AdaptivePowerTier.Daily, now, true, "负载持续升高，准备进入日常档", upshift, strongEvidence);
 
                 ClearTransition();
                 _lastReason = FormatStatus("保持安静档，等待日常负载", upshift);
@@ -185,10 +219,10 @@ namespace X15FanCore.Control
             if (_currentTier == AdaptivePowerTier.Daily)
             {
                 if (codeEvidence)
-                    return ConsiderTransition(AdaptivePowerTier.Code, now, true, "中等负载持续，准备进入代码档", upshift);
+                    return ConsiderTransition(AdaptivePowerTier.Code, now, true, "中等负载持续，准备进入代码档", upshift, strongEvidence);
 
                 if (dailyToQuiet)
-                    return ConsiderTransition(AdaptivePowerTier.Quiet, now, false, "极低负载和温度持续稳定，准备进入安静档", average);
+                    return ConsiderTransition(AdaptivePowerTier.Quiet, now, false, "极低负载和温度持续稳定，准备进入安静档", average, false);
 
                 ClearTransition();
                 _lastReason = FormatStatus("保持日常档，负载未达到代码档条件", upshift);
@@ -198,10 +232,10 @@ namespace X15FanCore.Control
             if (_currentTier == AdaptivePowerTier.Code)
             {
                 if (heavyEvidence)
-                    return ConsiderTransition(AdaptivePowerTier.Heavy, now, true, "高负载持续，准备进入重负载档", upshift);
+                    return ConsiderTransition(AdaptivePowerTier.Heavy, now, true, "高负载持续，准备进入重负载档", upshift, strongEvidence);
 
                 if (codeToDaily)
-                    return ConsiderTransition(AdaptivePowerTier.Daily, now, false, "低负载和温度持续稳定，准备回到日常档", average);
+                    return ConsiderTransition(AdaptivePowerTier.Daily, now, false, "低负载和温度持续稳定，准备回到日常档", average, false);
 
                 ClearTransition();
                 _lastReason = FormatStatus("保持代码档，等待负载持续降低", average);
@@ -211,7 +245,7 @@ namespace X15FanCore.Control
             if (_currentTier == AdaptivePowerTier.Heavy)
             {
                 if (heavyToCode)
-                    return ConsiderTransition(AdaptivePowerTier.Code, now, false, "负载和温度持续回落，准备进入代码档", average);
+                    return ConsiderTransition(AdaptivePowerTier.Code, now, false, "负载和温度持续回落，准备进入代码档", average, false);
 
                 ClearTransition();
                 _lastReason = FormatStatus("保持重负载档，等待负载持续降低", average);
@@ -228,9 +262,14 @@ namespace X15FanCore.Control
             DateTime now,
             bool upshift,
             string reason,
-            WindowStats stats)
+            WindowStats stats,
+            bool strongEvidence)
         {
-            if (_tierSinceUtc.HasValue &&
+            // The minimum tier hold prevents flapping, but strong evidence
+            // (game-level load) pierces it: a game opening needs performance
+            // headroom immediately and downshifts stay slow regardless, so
+            // piercing the hold cannot cause a fast flap.
+            if (_tierSinceUtc.HasValue && !(upshift && strongEvidence) &&
                 (now - _tierSinceUtc.Value).TotalSeconds < MinimumTierHoldSeconds)
             {
                 ClearTransition();
@@ -250,6 +289,8 @@ namespace X15FanCore.Control
 
             _pendingTier = target;
             double dwell = GetTransitionDwellSeconds(_currentTier, target);
+            if (upshift && strongEvidence)
+                dwell = Math.Min(dwell, StrongUpshiftDwellSeconds);
             double elapsed = Math.Max(0, (now - marker.Value).TotalSeconds);
             _dwellRemainingSeconds = Math.Max(0, dwell - elapsed);
             _lastReason = reason + "，还需" + Math.Ceiling(_dwellRemainingSeconds) + "秒" + FormatStats(stats);

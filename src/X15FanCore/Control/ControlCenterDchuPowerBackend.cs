@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Reflection;
@@ -128,25 +129,59 @@ namespace X15FanCore.Control
             string stagedNative = Path.Combine(nativeDirectory, "InsydeDCHU.dll");
             File.Copy(nativeSource, stagedNative, true);
             SetDllDirectory(nativeDirectory);
-            string resolvedSdkDirectory = sdkDirectory;
-            string resolvedCpuOcDirectory = cpuOcDirectory;
 
-            ResolveEventHandler resolver = (sender, args) =>
+            // Register the SDK dependency resolver exactly once.  The previous
+            // per-call registration accumulated AppDomain-wide handlers that
+            // were never removed, and Assembly.Load(File.ReadAllBytes(...))
+            // created a duplicate assembly instance on every load.  The
+            // resolver caches loaded dependencies and refreshes its search
+            // directories on each probe so an updated Control Center install
+            // is picked up without leaking handlers.
+            lock (_resolveLock)
             {
-                string name = new AssemblyName(args.Name).Name + ".dll";
-                string[] candidates =
+                _resolvedSdkDirectory = sdkDirectory;
+                _resolvedCpuOcDirectory = cpuOcDirectory;
+                _resolvedAssemblies.Clear();
+                if (!_resolverRegistered)
                 {
-                    Path.Combine(resolvedSdkDirectory, name),
-                    Path.Combine(resolvedCpuOcDirectory, name)
-                };
-                string dependency = candidates.FirstOrDefault(File.Exists);
-                return dependency == null ? null : Assembly.Load(File.ReadAllBytes(dependency));
-            };
-            AppDomain.CurrentDomain.AssemblyResolve += resolver;
+                    AppDomain.CurrentDomain.AssemblyResolve += OnAssemblyResolve;
+                    _resolverRegistered = true;
+                }
+            }
 
             Assembly assembly = Assembly.Load(File.ReadAllBytes(backgroundPath));
             Type dchuType = assembly.GetType(DchuTypeName, true);
             return Activator.CreateInstance(dchuType, true);
+        }
+
+        private static readonly object _resolveLock = new object();
+        private static bool _resolverRegistered;
+        private static string _resolvedSdkDirectory;
+        private static string _resolvedCpuOcDirectory;
+        private static readonly Dictionary<string, Assembly> _resolvedAssemblies =
+            new Dictionary<string, Assembly>(StringComparer.OrdinalIgnoreCase);
+
+        private static Assembly OnAssemblyResolve(object sender, ResolveEventArgs args)
+        {
+            string name = new AssemblyName(args.Name).Name + ".dll";
+            string[] candidates =
+            {
+                Path.Combine(_resolvedSdkDirectory ?? string.Empty, name),
+                Path.Combine(_resolvedCpuOcDirectory ?? string.Empty, name)
+            };
+            string dependency = candidates.FirstOrDefault(File.Exists);
+            if (dependency == null)
+                return null;
+
+            lock (_resolveLock)
+            {
+                Assembly cached;
+                if (_resolvedAssemblies.TryGetValue(name, out cached))
+                    return cached;
+                Assembly loaded = Assembly.Load(File.ReadAllBytes(dependency));
+                _resolvedAssemblies[name] = loaded;
+                return loaded;
+            }
         }
 
         private static void EnsureDchuDriverReady()

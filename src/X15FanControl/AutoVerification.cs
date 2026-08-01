@@ -163,18 +163,17 @@ namespace X15FanControl
             for (int i = 0; i < samples; i++)
             {
                 _lastGpuTelemetry = _gpuTelemetry?.Latest;
+                // 先更新就绪状态再写行，避免可用遥测被误记为 "N/A"
+                if (_lastGpuTelemetry != null && _lastGpuTelemetry.IsAvailable && !_lastGpuTelemetry.IsStale)
+                {
+                    _gpuTelemetryReady = true;
+                }
                 var cpuRaw = EcReadRaw(1);
                 var gpuRaw = EcReadRaw(2);
                 double elapsed = i * 0.5;
 
                 string line = $"{elapsed:F1},{cpuRaw.Remote},{(_gpuTelemetryReady ? _lastGpuTelemetry.TemperatureC.ToString() : "N/A")},{(_gpuTelemetryReady ? _lastGpuTelemetry.UtilizationPercent.ToString() : "N/A")},{(_gpuTelemetryReady ? _lastGpuTelemetry.PowerWatts.ToString("F1") : "N/A")},{(_gpuTelemetryReady ? (_lastGpuTelemetry.PState ?? "N/A") : "N/A")},{(_gpuTelemetryReady ? (_lastGpuTelemetry.SourceName ?? "N/A") : "N/A")},{EcGetCpuRpm()},{EcGetGpuRpm()},{cpuRaw.FanDuty},{gpuRaw.FanDuty},{cpuRaw.Remote},{cpuRaw.Local},{gpuRaw.Remote},{gpuRaw.Local}";
                 _csvWriter.WriteLine(line);
-
-                // 检查GPU遥测更新
-                if (_lastGpuTelemetry != null && _lastGpuTelemetry.IsAvailable && !_lastGpuTelemetry.IsStale)
-                {
-                    _gpuTelemetryReady = true;
-                }
 
                 // 检查异常
                 if (cpuRaw.Remote <= 0 || cpuRaw.Remote >= 110)

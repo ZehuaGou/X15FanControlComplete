@@ -79,6 +79,19 @@ namespace X15FanCore.Control
             _gpu.MarkWritten(percent, timestampUtc);
         }
 
+        // External override detection is fed by the async write verification
+        // tasks.  A confirmed override means another controller is fighting the
+        // EC duty register, which this application must never tolerate.
+        public bool CheckCpuExternalOverride(double readbackPercent)
+        {
+            return _cpu.CheckExternalOverride(readbackPercent);
+        }
+
+        public bool CheckGpuExternalOverride(double readbackPercent)
+        {
+            return _gpu.CheckExternalOverride(readbackPercent);
+        }
+
         private double CalculateCoupling(int otherTemperatureC)
         {
             if (otherTemperatureC <= _profile.CouplingStartTemperatureC)

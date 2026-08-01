@@ -52,6 +52,13 @@ namespace X15FanControl
         private System.Threading.CancellationTokenSource _cpuVerificationCts;
         private System.Threading.CancellationTokenSource _gpuVerificationCts;
         private readonly object _verificationLock = new object();
+        // Latest write-verification outcomes, published by the verification
+        // tasks and consumed by the control loop / dashboard / CSV logger.
+        private int _cpuOverrideDetected;
+        private int _gpuOverrideDetected;
+        private int _cpuLastReadbackPercent;
+        private int _gpuLastReadbackPercent;
+        private int _overrideFallbackHandling;
         private AppConfig _config;
         private ConfigStore _configStore;
         private FanControlEngine _engine;
@@ -94,6 +101,11 @@ namespace X15FanControl
 
         // Async logging
         private readonly ConcurrentQueue<string> _logQueue = new ConcurrentQueue<string>();
+        // UI log lines wait in their own queue and are appended in batches:
+        // per-line BeginInvoke under write-verification logging (2-4 lines/s)
+        // piled up UI thread messages and made the window sluggish.
+        private readonly ConcurrentQueue<string> _uiLogQueue = new ConcurrentQueue<string>();
+        private long _lastUiLogFlushTick;
         private System.Threading.CancellationTokenSource _logCts;
         private Task _logFlushTask;
         private int _currentLogLines;
@@ -286,8 +298,10 @@ namespace X15FanControl
 
             if (_config.EnableCsvLogging)
             {
-                _csvLogger = new CsvLogger(Path.Combine(_dataDirectory, "logs"));
-                AppendLog("CSV 日志：" + _csvLogger.FilePath);
+                _csvLogger = new CsvLogger(
+                    Path.Combine(_dataDirectory, "logs"),
+                    retentionDays: _config.CsvRetentionDays);
+                AppendLog("CSV 日志：" + _csvLogger.FilePath + "（保留 " + _config.CsvRetentionDays + " 天）");
             }
 
             AppendLog("界面初始化完成，硬件将在后台加载...");
@@ -919,7 +933,8 @@ namespace X15FanControl
             _restoreAutoButton.Click += delegate { RestoreAuto("Manual Restore Auto"); };
             Button ecProbeButton = new Button { Text = "EC诊断", Width = 68, Height = 31 };
             StyleButton(ecProbeButton, Color.FromArgb(225, 247, 250), Color.FromArgb(0, 91, 104));
-            ecProbeButton.Click += delegate { RunEcProbe(); };
+            // 异步探测：同步版会在 UI 线程执行最长约 30 秒的 EC 调用并冻结窗口。
+            ecProbeButton.Click += delegate { _ = RunEcProbeAsync(); };
             Button strategyStatusButton = new Button { Text = "策略状态", Width = 78, Height = 31 };
             StyleButton(strategyStatusButton, Color.FromArgb(255, 235, 205), Color.FromArgb(115, 70, 0));
             strategyStatusButton.Click += delegate { if (_mainTabs != null) _mainTabs.SelectedIndex = 0; };

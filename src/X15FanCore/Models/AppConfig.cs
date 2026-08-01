@@ -17,6 +17,7 @@ namespace X15FanCore.Models
             StartMinimized = false;
             LaunchWatchdogInActiveMode = true;
             EnableCsvLogging = true;
+            CsvRetentionDays = 7;
             Profiles = new List<FanProfile>();
             CalibrationNoisyPointsCpu = new List<int>();
             CalibrationNoisyPointsGpu = new List<int>();
@@ -95,5 +96,9 @@ namespace X15FanCore.Models
         // exposed as user-editable configuration.
         [DataMember(Order = 19)]
         public StrategyMode StrategyMode { get; set; }
+
+        // CSV 日志保留天数：超过后自动清理，控制 logs 目录体积。
+        [DataMember(Order = 20)]
+        public int CsvRetentionDays { get; set; }
     }
 }

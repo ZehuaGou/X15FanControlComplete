@@ -145,6 +145,7 @@ namespace X15FanCore.Control
                 changed = true;
             }
             config.AdaptivePower.Normalize();
+            if (config.CsvRetentionDays <= 0) { config.CsvRetentionDays = 7; changed = true; }
 
             StrategyMode parsedMode;
             if (!hasExplicitStrategyMode && StrategyModeInfo.TryParse(config.ActiveProfileName, out parsedMode))

@@ -438,6 +438,22 @@ namespace X15FanControl
                             decision = _engine.Update(snapshot);
                         }
 
+                        // Publish the latest async write-verification outcome.
+                        // The readback lags one control cycle by design: the
+                        // verification task samples ~1s after a write.
+                        decision.Cpu.EcReadbackPercent = Volatile.Read(ref _cpuLastReadbackPercent);
+                        decision.Gpu.EcReadbackPercent = Volatile.Read(ref _gpuLastReadbackPercent);
+                        decision.Cpu.ExternalOverrideDetected = Volatile.Read(ref _cpuOverrideDetected) != 0;
+                        decision.Gpu.ExternalOverrideDetected = Volatile.Read(ref _gpuOverrideDetected) != 0;
+                        if (decision.Cpu.ExternalOverrideDetected &&
+                            decision.Cpu.State != ControlState.Emergency &&
+                            decision.Cpu.State != ControlState.InvalidSensor)
+                            decision.Cpu.State = ControlState.ExternalOverride;
+                        if (decision.Gpu.ExternalOverrideDetected &&
+                            decision.Gpu.State != ControlState.Emergency &&
+                            decision.Gpu.State != ControlState.InvalidSensor)
+                            decision.Gpu.State = ControlState.ExternalOverride;
+
                         ApplyCpuRpmSafetyGuard(snapshot, decision, now);
 
                         if (decision.RequestAutoFallback)
@@ -573,6 +589,14 @@ namespace X15FanControl
                 return;
             }
 
+            // 与手动 Active 路径一致：Control Center 未让出控制权时拒绝启动。
+            // 手动路径 SetRunMode 会弹窗说明，自启路径静默记录后保持只读。
+            if (_controlCenterLease == null || !_controlCenterLease.IsAcquired)
+            {
+                AppendLog("自动Active失败：Control Center 尚未让出控制权");
+                return;
+            }
+
             // 检查冲突进程
             var conflicts = ConflictDetector.FindConflicts();
             if (conflicts.Count > 0)
@@ -678,7 +702,7 @@ namespace X15FanControl
                     // 检查是否已被取代
                     if (!IsLatestVerification(channel, seqId, token)) return;
 
-                    // 50ms回读
+                    // 50ms回读：确认写入立即生效
                     await System.Threading.Tasks.Task.Delay(50, token);
                     if (!IsLatestVerification(channel, seqId, token)) return;
                     int duty50 = 0;
@@ -687,35 +711,59 @@ namespace X15FanControl
                     long delay50 = stopwatch.ElapsedMilliseconds;
                     if (detailedLog) LogVerification(seqId, channel, "50ms", requestedPercent, duty50, pct50, beforeDuty, delay50, 0, beforeRpm);
 
-                    // 200ms回读
-                    await System.Threading.Tasks.Task.Delay(150, token); // 50+150=200
-                    if (!IsLatestVerification(channel, seqId, token)) return;
-                    int duty200 = 0;
-                    duty200 = (await ExecuteEcAsync("Verify ch" + channel + " ReadRaw 200ms", ec => ec.ReadRaw(channel), token, EcAccessPriority.Verification)).FanDuty;
-                    double pct200 = duty200 * 100.0 / 255.0;
-                    long delay200 = stopwatch.ElapsedMilliseconds;
-                    if (detailedLog) LogVerification(seqId, channel, "200ms", requestedPercent, duty200, pct200, beforeDuty, delay200, 0, beforeRpm);
-
-                    // 1000ms回读 + RPM响应检查
-                    await System.Threading.Tasks.Task.Delay(800, token); // 200+800=1000
+                    // 1000ms回读：写入稳定后是否仍保持，同时检测外部覆盖
+                    await System.Threading.Tasks.Task.Delay(950, token); // 50+950=1000
                     if (!IsLatestVerification(channel, seqId, token)) return;
                     int duty1000 = 0;
                     duty1000 = (await ExecuteEcAsync("Verify ch" + channel + " ReadRaw 1000ms", ec => ec.ReadRaw(channel), token, EcAccessPriority.Verification)).FanDuty;
                     double pct1000 = duty1000 * 100.0 / 255.0;
                     long delay1000 = stopwatch.ElapsedMilliseconds;
                     if (detailedLog) LogVerification(seqId, channel, "1000ms", requestedPercent, duty1000, pct1000, beforeDuty, delay1000, 0, beforeRpm);
-
-                    // 3000ms最终占空比确认；RPM读取不参与Active链路。
-                    await System.Threading.Tasks.Task.Delay(2000, token); // 1000+2000=3000
-                    if (!IsLatestVerification(channel, seqId, token)) return;
-                    int duty3000 = (await ExecuteEcAsync("Verify ch" + channel + " ReadRaw 3000ms", ec => ec.ReadRaw(channel), token, EcAccessPriority.Verification)).FanDuty;
-                    long delay3000 = stopwatch.ElapsedMilliseconds;
-                    double pct3000 = duty3000 * 100.0 / 255.0;
-                    AppendLog($"  [seq={seqId}] [{delay3000}ms] 最终EC占空：{duty3000}({pct3000:F1}%) (目标={requestedPercent}%)");
+                    AppendLog($"  [seq={seqId}] [{delay1000}ms] 最终EC占空：{duty1000}({pct1000:F1}%) (目标={requestedPercent}%)");
 
                     // 外部覆盖检测：50ms匹配但1000ms被改回
                     if (Math.Abs(pct50 - requestedPercent) <= 2.0 && Math.Abs(pct1000 - requestedPercent) > 3.0)
                         AppendLog($"  [seq={seqId}] ⚠ 外部覆盖检测: 50ms差异={Math.Abs(pct50 - requestedPercent):F1}%, 1000ms差异={Math.Abs(pct1000 - requestedPercent):F1}%, 写入被改回");
+
+                    // 将回读结果与覆盖判定发布给控制循环/仪表盘/CSV。
+                    // CheckExternalOverride 内部累计连续失配，确认后才置真，
+                    // 因此单次瞬态回读不会误报。引擎状态必须与 Update 串行。
+                    bool overridden = false;
+                    lock (_engineLock)
+                    {
+                        if (_engine != null)
+                        {
+                            overridden = channel == 1
+                                ? _engine.CheckCpuExternalOverride(pct1000)
+                                : _engine.CheckGpuExternalOverride(pct1000);
+                        }
+                    }
+                    if (channel == 1)
+                    {
+                        Interlocked.Exchange(ref _cpuLastReadbackPercent, (int)Math.Round(pct1000));
+                        Interlocked.Exchange(ref _cpuOverrideDetected, overridden ? 1 : 0);
+                    }
+                    else
+                    {
+                        Interlocked.Exchange(ref _gpuLastReadbackPercent, (int)Math.Round(pct1000));
+                        Interlocked.Exchange(ref _gpuOverrideDetected, overridden ? 1 : 0);
+                    }
+
+                    if (overridden && Interlocked.Exchange(ref _overrideFallbackHandling, 1) == 0)
+                    {
+                        string channelName = channel == 1 ? "CPU" : "GPU";
+                        AppendLog($"  [seq={seqId}] ⚠ {channelName} 外部覆盖已确认：EC占空被其他控制器持续改回，切换只读并恢复自动。");
+                        try
+                        {
+                            BeginInvoke(new Action(() =>
+                            {
+                                if (_closing || _runMode != RunMode.Active) return;
+                                RestoreAuto("外部覆盖");
+                                SetRunMode(RunMode.ReadOnly, "外部覆盖故障保护", false);
+                            }));
+                        }
+                        catch { }
+                    }
                 }
                 catch (OperationCanceledException)
                 {
@@ -911,6 +959,7 @@ namespace X15FanControl
                     return true;
                 }, token);
                 lock (_engineLock) { _engine.MarkCpuWritten(decision.Cpu.WritePercent, now); }
+                StartWriteVerification(1, decision.Cpu.WritePercent, snapshot.CpuDutyPercent, snapshot.CpuRpm);
                 if (_config.DetailedVerificationLogging)
                     AppendLog("EC写入完成：CPU=" + decision.Cpu.WritePercent + "%，快照前值=" + snapshot.CpuDutyPercent + "%；由下一次快照确认");
             }
@@ -923,6 +972,7 @@ namespace X15FanControl
                     return true;
                 }, token);
                 lock (_engineLock) { _engine.MarkGpuWritten(decision.Gpu.WritePercent, now); }
+                StartWriteVerification(2, decision.Gpu.WritePercent, snapshot.GpuDutyPercent, snapshot.GpuRpm);
                 if (_config.DetailedVerificationLogging)
                     AppendLog("EC写入完成：GPU=" + decision.Gpu.WritePercent + "%，快照前值=" + snapshot.GpuDutyPercent + "%；由下一次快照确认");
             }
@@ -1194,54 +1244,6 @@ namespace X15FanControl
                 case ControlState.ExternalOverride: return "外部覆盖";
                 case ControlState.RestoredAuto: return "自动控制";
                 default: return state.ToString();
-            }
-        }
-
-        private void RunEcProbe()
-        {
-            AppendLog("===== EC通道诊断探测开始 =====");
-            if (!IsEcReady())
-            {
-                AppendLog("EC未初始化，无法探测。");
-                return;
-            }
-
-            try
-            {
-                int fanCount = EcGetCount();
-                AppendLog("EC报告的通道数：" + fanCount);
-
-                for (int ch = 0; ch <= 3; ch++)
-                {
-                    EcData raw = EcReadRaw(ch);
-                    AppendLog(string.Format(
-                        "  通道{0}: Remote={1}°C, Local={2}°C, FanDuty={3}({4:F1}%), Reserve={5}",
-                        ch, raw.Remote, raw.Local, raw.FanDuty,
-                        raw.FanDuty * 100.0 / 255.0, raw.Reserve));
-                }
-
-                // CPU/GPU 转速
-                _lastCpuRpm = EcGetCpuRpmLocked();
-                _lastGpuRpm = EcGetGpuRpmLocked();
-                AppendLog(string.Format("CPU转速: {0}, GPU转速: {1}",
-                    _lastCpuRpm > 0 ? _lastCpuRpm.ToString() : "—",
-                    _lastGpuRpm > 0 ? _lastGpuRpm.ToString() : "—"));
-
-                // 诊断建议
-                EcData ch1 = EcReadRaw(1);
-                EcData ch2 = EcReadRaw(2);
-
-                if (ch2.Remote == ch2.Local && ch2.Remote > 0)
-                {
-                    AppendLog("注意：通道2的Remote和Local值相同，可能数据不可靠。");
-                }
-
-                AppendLog("诊断：若GPU温度不变化，请检查通道2的Local值是否更符合实际GPU温度。");
-                AppendLog("===== EC通道诊断探测结束 =====");
-            }
-            catch (Exception ex)
-            {
-                AppendLog("EC探测异常：" + ex.Message);
             }
         }
 
@@ -1634,6 +1636,8 @@ namespace X15FanControl
         }
 
         // 异步日志后台写入循环
+        private const long MaxLogFileBytes = 2 * 1024 * 1024; // 2MB 上限
+
         private async Task LogFlushLoop(CancellationToken token)
         {
             while (!token.IsCancellationRequested)
@@ -1669,6 +1673,21 @@ namespace X15FanControl
                 try
                 {
                     string logPath = Path.Combine(_dataDirectory, "application.log");
+
+                    // 限制 application.log 体积：超过上限时轮转一次，
+                    // 保留最近两个文件（当前 + .1 备份），长期运行不会无限增长。
+                    FileInfo logInfo = new FileInfo(logPath);
+                    if (logInfo.Exists && logInfo.Length > MaxLogFileBytes)
+                    {
+                        try
+                        {
+                            string rotated = logPath + ".1";
+                            if (File.Exists(rotated)) File.Delete(rotated);
+                            File.Move(logPath, rotated);
+                        }
+                        catch { }
+                    }
+
                     File.AppendAllText(logPath, sb.ToString());
                 }
                 catch { }
@@ -1681,36 +1700,67 @@ namespace X15FanControl
 
             // 加入异步日志队列（后台线程批量写入文件）
             _logQueue.Enqueue(DateTime.Now.ToString("O") + "  " + message + Environment.NewLine);
+            // UI 显示行入独立队列，由 FlushUiLogQueue 批量追加
+            _uiLogQueue.Enqueue(line + Environment.NewLine);
 
-            // UI线程更新文本框（仅窗口可见时）
+            // UI线程更新文本框（仅窗口可见时）。节流到最多每250ms一次：
+            // 委托内从队列批量取出全部待显示行，一次AppendText。
             if (Visible && ShowInTaskbar && _logTextBox != null && !_logTextBox.IsDisposed)
             {
-                try
+                long now = Environment.TickCount;
+                if (now - _lastUiLogFlushTick >= 250)
                 {
-                    _logTextBox.BeginInvoke(new Action(() =>
+                    _lastUiLogFlushTick = now;
+                    try
                     {
-                        _logTextBox.AppendText(line + Environment.NewLine);
-                        _currentLogLines++;
-                        // 超过限制时批量删除旧行
-                        if (_currentLogLines > _config.MaxUiLogLines)
-                        {
-                            int remove = _config.MaxUiLogLines / 2;
-                            var text = _logTextBox.Text;
-                            int idx = 0;
-                            for (int i = 0; i < remove; i++)
-                            {
-                                int next = text.IndexOf(Environment.NewLine, idx);
-                                if (next < 0) break;
-                                idx = next + Environment.NewLine.Length;
-                            }
-                            if (idx > 0)
-                                _logTextBox.Text = text.Substring(idx);
-                            _currentLogLines -= remove;
-                        }
-                    }));
+                        _logTextBox.BeginInvoke(new Action(FlushUiLogQueue));
+                    }
+                    catch { }
                 }
-                catch { }
             }
+        }
+
+        // UI线程：批量追加排队日志，避免每条日志一个BeginInvoke
+        private void FlushUiLogQueue()
+        {
+            if (_logTextBox == null || _logTextBox.IsDisposed || _config == null)
+                return;
+
+            var sb = new StringBuilder();
+            string pending;
+            int count = 0;
+            while (_uiLogQueue.TryDequeue(out pending) && count < 200)
+            {
+                sb.Append(pending);
+                count++;
+            }
+            if (count == 0)
+                return;
+
+            try
+            {
+                _logTextBox.AppendText(sb.ToString());
+                _currentLogLines += count;
+                // 超过限制时批量删除旧行
+                if (_currentLogLines > _config.MaxUiLogLines)
+                {
+                    int remove = _config.MaxUiLogLines / 2;
+                    var text = _logTextBox.Text;
+                    int idx = 0;
+                    int removed = 0;
+                    for (int i = 0; i < remove; i++)
+                    {
+                        int next = text.IndexOf(Environment.NewLine, idx);
+                        if (next < 0) break;
+                        idx = next + Environment.NewLine.Length;
+                        removed++;
+                    }
+                    if (idx > 0)
+                        _logTextBox.Text = text.Substring(idx);
+                    _currentLogLines -= removed;
+                }
+            }
+            catch { }
         }
 
         private void MainFormResize(object sender, EventArgs e)

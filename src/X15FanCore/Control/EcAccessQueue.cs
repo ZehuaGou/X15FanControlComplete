@@ -214,9 +214,16 @@ namespace X15FanCore.Control
             CancelPendingRequests();
             _signal.Set();
             try { _worker.Wait(1000); } catch { }
-            _signal.Dispose();
-            // If native code is stuck, do not dispose it from another thread.
-            // The dedicated worker will clean up if it eventually returns.
+            // The native EC DLL can legitimately hold the worker for 5-6
+            // seconds (see write verification), so the worker may still be
+            // blocked in _signal.WaitOne after the wait above.  Disposing the
+            // event then would raise ObjectDisposedException on the worker
+            // thread while it drains cancellation.  Only dispose once the
+            // worker has actually exited; otherwise leave the handle for the
+            // OS to reclaim at process exit.  The dedicated worker still
+            // disposes the native object in its own finally block.
+            if (_worker.IsCompleted)
+                _signal.Dispose();
         }
     }
 }
