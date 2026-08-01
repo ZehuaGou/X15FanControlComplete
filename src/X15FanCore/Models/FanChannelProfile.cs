@@ -27,7 +27,7 @@ namespace X15FanCore.Models
             StableZoneMinimumPercent = 50;
             StableZoneMaximumPercent = 57;
             StableZoneHoldPercent = 53;
-            EmergencyStage1TemperatureC = 88;
+            EmergencyStage1TemperatureC = 89;
             EmergencyStage1Percent = 75;
             EmergencyStage2TemperatureC = 92;
             EmergencyStage2Percent = 100;

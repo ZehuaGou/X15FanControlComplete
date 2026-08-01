@@ -224,8 +224,12 @@ namespace X15FanCore.Control
                 return false;
 
             bool changed = false;
-            changed |= ApplySafetyPolicy(profile.Cpu, 87, 75, 90, 90, 93);
-            changed |= ApplySafetyPolicy(profile.Gpu, 82, 70, 85, 85, 87);
+            // Stage-1 thresholds sit above the temperatures this notebook
+            // reaches during normal use (idle ~80C, heavy work 85-87C), so
+            // the emergency floor no longer snaps the fans on routine load.
+            // Stage 2/3 remain unchanged and still respond immediately.
+            changed |= ApplySafetyPolicy(profile.Cpu, 89, 75, 90, 90, 93);
+            changed |= ApplySafetyPolicy(profile.Gpu, 82, 75, 85, 85, 87);
             return changed;
         }
 

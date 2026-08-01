@@ -180,7 +180,15 @@ namespace X15FanCore.Control
             else if (emergencyStage1)
             {
                 _acceptedTarget = Math.Max(Math.Max(_acceptedTarget, rawTarget), _profile.EmergencyStage1Percent);
-                _applied = Math.Max(_applied, _profile.EmergencyStage1Percent);
+                // Stage 1 ramps quickly instead of snapping: the target jumps
+                // to the floor immediately, but the applied duty climbs at a
+                // bounded rate capped by the ACCEPTED target, not by the floor
+                // itself.  Capping at the 75% floor would strand the fan below
+                // a higher curve demand (e.g. 85% at 89C) indefinitely.  Stage
+                // 2/3 stay immediate because those are real thermal emergencies.
+                double stage1RampRate = Math.Max(4.0, _profile.UpRatePercentPerSecond * 4.0);
+                double stage1Limit = Math.Min(_acceptedTarget, _applied + stage1RampRate * Math.Max(0.01, elapsedSeconds));
+                _applied = Math.Max(_applied, stage1Limit);
                 decision.Reason = DecisionReason.EmergencyStage1;
                 decision.State = ControlState.Emergency;
                 decision.Detail = "Stage 1 emergency";

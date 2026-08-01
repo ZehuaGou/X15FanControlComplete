@@ -24,14 +24,19 @@ For each fan channel:
 
 Emergency temperature checks use the instantaneous sensor value, not a filtered value.
 
-Default Stable Noise profile:
+Built-in profile safety floor (enforced by `DefaultProfiles.ApplySafetyPolicy`):
 
-- CPU ≥ 88 °C: immediately at least 75%.
-- CPU ≥ 92 °C: immediately 100%.
-- GPU ≥ 83 °C: immediately at least 75%.
-- GPU ≥ 87 °C: immediately 100%.
+- CPU ≥ 89 °C: at least 75%, applied via a bounded fast ramp (4× normal up-rate, ≥4 %/s) capped at the accepted curve target; the target jumps to the floor immediately.
+- CPU ≥ 90 °C: immediately 100%.
+- GPU ≥ 82 °C: at least 75%, immediate.
+- GPU ≥ 85 °C: immediately 100%.
 
-These values are initial safeguards, not a claim that they are ideal for every workload.
+Stage 1 ramps instead of snapping because 87–89 °C is reached routinely during
+normal use on the target notebook (idle sits near 80 °C); an instant duty snap
+at that boundary produced audible fan jumps several times an hour. Stages 2/3
+remain immediate — those are real thermal emergencies. The CPU stage-1
+threshold was calibrated from 87 °C to 89 °C (config migration rewrites the old
+built-in default combination on load).
 
 ## Acoustic stable zone
 

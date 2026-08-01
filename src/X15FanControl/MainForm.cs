@@ -58,6 +58,10 @@ namespace X15FanControl
         private int _gpuOverrideDetected;
         private int _cpuLastReadbackPercent;
         private int _gpuLastReadbackPercent;
+        private int _cpuLastReadbackDuty;
+        private int _gpuLastReadbackDuty;
+        private int _cpuWriteVerified;
+        private int _gpuWriteVerified;
         private int _overrideFallbackHandling;
         private AppConfig _config;
         private ConfigStore _configStore;

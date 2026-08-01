@@ -443,6 +443,10 @@ namespace X15FanControl
                         // verification task samples ~1s after a write.
                         decision.Cpu.EcReadbackPercent = Volatile.Read(ref _cpuLastReadbackPercent);
                         decision.Gpu.EcReadbackPercent = Volatile.Read(ref _gpuLastReadbackPercent);
+                        decision.Cpu.EcReadbackDuty = Volatile.Read(ref _cpuLastReadbackDuty);
+                        decision.Gpu.EcReadbackDuty = Volatile.Read(ref _gpuLastReadbackDuty);
+                        decision.Cpu.WriteVerified = Volatile.Read(ref _cpuWriteVerified) != 0;
+                        decision.Gpu.WriteVerified = Volatile.Read(ref _gpuWriteVerified) != 0;
                         decision.Cpu.ExternalOverrideDetected = Volatile.Read(ref _cpuOverrideDetected) != 0;
                         decision.Gpu.ExternalOverrideDetected = Volatile.Read(ref _gpuOverrideDetected) != 0;
                         if (decision.Cpu.ExternalOverrideDetected &&
@@ -738,14 +742,21 @@ namespace X15FanControl
                                 : _engine.CheckGpuExternalOverride(pct1000);
                         }
                     }
+                    // 回读占空与写入是否被验证确认（1000ms 回读与目标相差 ≤2%）。
+                    // CSV 的 readback_duty / write_verified 列依赖这些发布。
+                    bool verified = Math.Abs(pct1000 - requestedPercent) <= 2.0;
                     if (channel == 1)
                     {
                         Interlocked.Exchange(ref _cpuLastReadbackPercent, (int)Math.Round(pct1000));
+                        Interlocked.Exchange(ref _cpuLastReadbackDuty, duty1000);
+                        Interlocked.Exchange(ref _cpuWriteVerified, verified ? 1 : 0);
                         Interlocked.Exchange(ref _cpuOverrideDetected, overridden ? 1 : 0);
                     }
                     else
                     {
                         Interlocked.Exchange(ref _gpuLastReadbackPercent, (int)Math.Round(pct1000));
+                        Interlocked.Exchange(ref _gpuLastReadbackDuty, duty1000);
+                        Interlocked.Exchange(ref _gpuWriteVerified, verified ? 1 : 0);
                         Interlocked.Exchange(ref _gpuOverrideDetected, overridden ? 1 : 0);
                     }
 
@@ -1700,13 +1711,14 @@ namespace X15FanControl
 
             // 加入异步日志队列（后台线程批量写入文件）
             _logQueue.Enqueue(DateTime.Now.ToString("O") + "  " + message + Environment.NewLine);
-            // UI 显示行入独立队列，由 FlushUiLogQueue 批量追加
-            _uiLogQueue.Enqueue(line + Environment.NewLine);
 
-            // UI线程更新文本框（仅窗口可见时）。节流到最多每250ms一次：
-            // 委托内从队列批量取出全部待显示行，一次AppendText。
+            // UI线程更新文本框（仅窗口可见时）。UI 显示行只在可见期间入队，
+            // 否则托盘隐藏时队列会无限累积（窗口不可见时没有人消费它）。
+            // 节流到最多每250ms一次：委托内从队列批量取出全部待显示行，
+            // 一次AppendText。
             if (Visible && ShowInTaskbar && _logTextBox != null && !_logTextBox.IsDisposed)
             {
+                _uiLogQueue.Enqueue(line + Environment.NewLine);
                 long now = Environment.TickCount;
                 if (now - _lastUiLogFlushTick >= 250)
                 {

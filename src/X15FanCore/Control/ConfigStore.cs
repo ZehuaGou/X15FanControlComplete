@@ -147,6 +147,26 @@ namespace X15FanCore.Control
             config.AdaptivePower.Normalize();
             if (config.CsvRetentionDays <= 0) { config.CsvRetentionDays = 7; changed = true; }
 
+            // 标定迁移：CPU 一级紧急温度从 87°C 调整为 89°C。87°C 在这台
+            // 笔记本上是常态温度（待机约 80°C），旧阈值导致紧急档在日常
+            // 使用中频繁触发、风扇突跳。只迁移与内置默认完全一致的
+            // CPU+GPU 阈值组合（87/90/93 + 82/85/87），自定义 Profile 几乎
+            // 不可能同时命中两组精确值。
+            foreach (FanProfile profile in config.Profiles)
+            {
+                if (profile?.Cpu == null || profile.Gpu == null) continue;
+                if (profile.Cpu.EmergencyStage1TemperatureC == 87 &&
+                    profile.Cpu.EmergencyStage2TemperatureC == 90 &&
+                    profile.Cpu.EmergencyStage3TemperatureC == 93 &&
+                    profile.Gpu.EmergencyStage1TemperatureC == 82 &&
+                    profile.Gpu.EmergencyStage2TemperatureC == 85 &&
+                    profile.Gpu.EmergencyStage3TemperatureC == 87)
+                {
+                    profile.Cpu.EmergencyStage1TemperatureC = 89;
+                    changed = true;
+                }
+            }
+
             StrategyMode parsedMode;
             if (!hasExplicitStrategyMode && StrategyModeInfo.TryParse(config.ActiveProfileName, out parsedMode))
             {
