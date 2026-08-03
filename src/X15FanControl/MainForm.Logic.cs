@@ -397,9 +397,26 @@ namespace X15FanControl
 
                     ControlDecision decision = null;
 
+                    FanWriteReadbackStatus cpuReadback;
+                    FanWriteReadbackStatus gpuReadback;
                     lock (_engineLock)
                     {
                         decision = _engine.Update(snapshot);
+                        // 普通快照已经包含两个通道的 duty 字节，直接用它确认
+                        // 上一周期写入并检测外部覆盖，不再追加专项 EC 读取。
+                        cpuReadback = _engine.ObserveCpuReadback(snapshot.CpuDutyPercent);
+                        gpuReadback = _engine.ObserveGpuReadback(snapshot.GpuDutyPercent);
+                    }
+
+                    PublishSnapshotReadback(decision, snapshot, cpuReadback, gpuReadback);
+                    if (cpuReadback.ExternalOverrideDetected || gpuReadback.ExternalOverrideDetected)
+                    {
+                        RequestExternalOverrideFallback(
+                            cpuReadback.ExternalOverrideDetected && gpuReadback.ExternalOverrideDetected
+                                ? "CPU/GPU"
+                                : (cpuReadback.ExternalOverrideDetected ? "CPU" : "GPU"));
+                        try { await Task.Delay(2000, token); } catch { break; }
+                        continue;
                     }
 
                         // Power policy is deliberately independent from the fan
@@ -409,26 +426,6 @@ namespace X15FanControl
                         // decision so the acoustic governor can see fan duty,
                         // temperature slope and emergency state.
                         UpdateAdaptivePowerPolicy(snapshot, decision, now);
-
-                        // Publish the latest async write-verification outcome.
-                        // The readback lags one control cycle by design: the
-                        // verification task samples ~1s after a write.
-                        decision.Cpu.EcReadbackPercent = Volatile.Read(ref _cpuLastReadbackPercent);
-                        decision.Gpu.EcReadbackPercent = Volatile.Read(ref _gpuLastReadbackPercent);
-                        decision.Cpu.EcReadbackDuty = Volatile.Read(ref _cpuLastReadbackDuty);
-                        decision.Gpu.EcReadbackDuty = Volatile.Read(ref _gpuLastReadbackDuty);
-                        decision.Cpu.WriteVerified = Volatile.Read(ref _cpuWriteVerified) != 0;
-                        decision.Gpu.WriteVerified = Volatile.Read(ref _gpuWriteVerified) != 0;
-                        decision.Cpu.ExternalOverrideDetected = Volatile.Read(ref _cpuOverrideDetected) != 0;
-                        decision.Gpu.ExternalOverrideDetected = Volatile.Read(ref _gpuOverrideDetected) != 0;
-                        if (decision.Cpu.ExternalOverrideDetected &&
-                            decision.Cpu.State != ControlState.Emergency &&
-                            decision.Cpu.State != ControlState.InvalidSensor)
-                            decision.Cpu.State = ControlState.ExternalOverride;
-                        if (decision.Gpu.ExternalOverrideDetected &&
-                            decision.Gpu.State != ControlState.Emergency &&
-                            decision.Gpu.State != ControlState.InvalidSensor)
-                            decision.Gpu.State = ControlState.ExternalOverride;
 
                         ApplyCpuRpmSafetyGuard(snapshot, decision, now);
 
@@ -642,6 +639,64 @@ namespace X15FanControl
             _lastCpuTemp = snapshot.CpuTemperatureC;
         }
 
+        private void PublishSnapshotReadback(
+            ControlDecision decision,
+            FanSnapshot snapshot,
+            FanWriteReadbackStatus cpu,
+            FanWriteReadbackStatus gpu)
+        {
+            if (decision == null || snapshot == null || cpu == null || gpu == null)
+                return;
+
+            int cpuRawDuty = (int)Math.Round(snapshot.CpuDutyPercent * 255.0 / 100.0);
+            int gpuRawDuty = (int)Math.Round(snapshot.GpuDutyPercent * 255.0 / 100.0);
+            Interlocked.Exchange(ref _cpuLastReadbackPercent, snapshot.CpuDutyPercent);
+            Interlocked.Exchange(ref _gpuLastReadbackPercent, snapshot.GpuDutyPercent);
+            Interlocked.Exchange(ref _cpuLastReadbackDuty, cpuRawDuty);
+            Interlocked.Exchange(ref _gpuLastReadbackDuty, gpuRawDuty);
+            Interlocked.Exchange(ref _cpuWriteVerified, cpu.Verified ? 1 : 0);
+            Interlocked.Exchange(ref _gpuWriteVerified, gpu.Verified ? 1 : 0);
+            Interlocked.Exchange(ref _cpuOverrideDetected, cpu.ExternalOverrideDetected ? 1 : 0);
+            Interlocked.Exchange(ref _gpuOverrideDetected, gpu.ExternalOverrideDetected ? 1 : 0);
+
+            decision.Cpu.EcReadbackPercent = snapshot.CpuDutyPercent;
+            decision.Gpu.EcReadbackPercent = snapshot.GpuDutyPercent;
+            decision.Cpu.EcReadbackDuty = cpuRawDuty;
+            decision.Gpu.EcReadbackDuty = gpuRawDuty;
+            decision.Cpu.WriteVerified = cpu.Verified;
+            decision.Gpu.WriteVerified = gpu.Verified;
+            decision.Cpu.ExternalOverrideDetected = cpu.ExternalOverrideDetected;
+            decision.Gpu.ExternalOverrideDetected = gpu.ExternalOverrideDetected;
+
+            if (cpu.ExternalOverrideDetected &&
+                decision.Cpu.State != ControlState.Emergency &&
+                decision.Cpu.State != ControlState.InvalidSensor)
+                decision.Cpu.State = ControlState.ExternalOverride;
+            if (gpu.ExternalOverrideDetected &&
+                decision.Gpu.State != ControlState.Emergency &&
+                decision.Gpu.State != ControlState.InvalidSensor)
+                decision.Gpu.State = ControlState.ExternalOverride;
+        }
+
+        private void RequestExternalOverrideFallback(string channelName)
+        {
+            if (Interlocked.Exchange(ref _overrideFallbackHandling, 1) != 0)
+                return;
+
+            AppendLog("⚠ " + channelName +
+                " 外部覆盖已由连续控制快照确认：EC占空被其他控制器持续改回，切换只读并恢复自动。");
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    if (_closing || _runMode != RunMode.Active) return;
+                    RestoreAuto("外部覆盖");
+                    SetRunMode(RunMode.ReadOnly, "外部覆盖故障保护", false);
+                }));
+            }
+            catch { }
+        }
+
         // 真正的异步写入验证（使用Task.Delay，非阻塞）
         // 每个通道最多一个有效验证任务，新写入会取消旧任务
         private void StartWriteVerification(int channel, int requestedPercent, int beforeDuty, int beforeRpm)
@@ -724,8 +779,8 @@ namespace X15FanControl
                         if (_engine != null)
                         {
                             overridden = channel == 1
-                                ? _engine.CheckCpuExternalOverride(pct1000)
-                                : _engine.CheckGpuExternalOverride(pct1000);
+                                ? _engine.ObserveCpuReadback(pct1000).ExternalOverrideDetected
+                                : _engine.ObserveGpuReadback(pct1000).ExternalOverrideDetected;
                         }
                     }
                     // 回读占空与写入是否被验证确认（1000ms 回读与目标相差 ≤2%）。
@@ -956,9 +1011,8 @@ namespace X15FanControl
                     return true;
                 }, token);
                 lock (_engineLock) { _engine.MarkCpuWritten(decision.Cpu.WritePercent, now); }
-                StartWriteVerification(1, decision.Cpu.WritePercent, snapshot.CpuDutyPercent, snapshot.CpuRpm);
                 if (_config.DetailedVerificationLogging)
-                    AppendLog("EC写入完成：CPU=" + decision.Cpu.WritePercent + "%，快照前值=" + snapshot.CpuDutyPercent + "%；由下一次快照确认");
+                    AppendLog("EC写入完成：CPU=" + decision.Cpu.WritePercent + "%，快照前值=" + snapshot.CpuDutyPercent + "%；由下一普通控制快照确认");
             }
 
             if (decision.Gpu.ShouldWrite)
@@ -969,9 +1023,8 @@ namespace X15FanControl
                     return true;
                 }, token);
                 lock (_engineLock) { _engine.MarkGpuWritten(decision.Gpu.WritePercent, now); }
-                StartWriteVerification(2, decision.Gpu.WritePercent, snapshot.GpuDutyPercent, snapshot.GpuRpm);
                 if (_config.DetailedVerificationLogging)
-                    AppendLog("EC写入完成：GPU=" + decision.Gpu.WritePercent + "%，快照前值=" + snapshot.GpuDutyPercent + "%；由下一次快照确认");
+                    AppendLog("EC写入完成：GPU=" + decision.Gpu.WritePercent + "%，快照前值=" + snapshot.GpuDutyPercent + "%；由下一普通控制快照确认");
             }
         }
 

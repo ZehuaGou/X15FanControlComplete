@@ -219,17 +219,26 @@ namespace X15FanCore.Control
             _gpu.MarkWritten(percent, timestampUtc);
         }
 
-        // External override detection is fed by the async write verification
-        // tasks.  A confirmed override means another controller is fighting the
-        // EC duty register, which this application must never tolerate.
-        public bool CheckCpuExternalOverride(double readbackPercent)
+        // 外部覆盖检测由每个普通控制快照的 ReadRaw 占空回读驱动。
+        // 不再为每次写入额外发起 50ms/1000ms EC 交易，避免高频控制
+        // 将单通道 EC 队列压垮。确认的连续失配仍会触发原有故障保护。
+        public FanWriteReadbackStatus ObserveCpuReadback(double readbackPercent)
         {
-            return _cpu.CheckExternalOverride(readbackPercent);
+            return _cpu.ObserveEcReadback(readbackPercent);
         }
 
-        public bool CheckGpuExternalOverride(double readbackPercent)
+        public FanWriteReadbackStatus ObserveGpuReadback(double readbackPercent)
         {
-            return _gpu.CheckExternalOverride(readbackPercent);
+            return _gpu.ObserveEcReadback(readbackPercent);
         }
+    }
+
+    public sealed class FanWriteReadbackStatus
+    {
+        public bool HasExpectedWrite { get; set; }
+        public double ExpectedPercent { get; set; }
+        public double ObservedPercent { get; set; }
+        public bool Verified { get; set; }
+        public bool ExternalOverrideDetected { get; set; }
     }
 }

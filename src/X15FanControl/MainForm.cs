@@ -43,17 +43,16 @@ namespace X15FanControl
         private int _controlLoopGuard;
 
         private EcAccessQueue _ecQueue;
-        // CPU and GPU verification share the same physical EC access path.
+        // 写入回读由下一个普通控制快照确认；不为每次写入额外
+        // 发起 50ms/1000ms EC 读取，避免压垮单通道 EC 队列。
+        // 旧专项验证管线仅保留为显式诊断能力，生产控制路径不再调用。
         private readonly System.Threading.SemaphoreSlim _verificationEcGate = new System.Threading.SemaphoreSlim(1, 1);
-        // Write verification (async via Task.Delay)
         private int _ecSequenceId;
         private int _latestCpuVerificationSequence;
         private int _latestGpuVerificationSequence;
         private System.Threading.CancellationTokenSource _cpuVerificationCts;
         private System.Threading.CancellationTokenSource _gpuVerificationCts;
         private readonly object _verificationLock = new object();
-        // Latest write-verification outcomes, published by the verification
-        // tasks and consumed by the control loop / dashboard / CSV logger.
         private int _cpuOverrideDetected;
         private int _gpuOverrideDetected;
         private int _cpuLastReadbackPercent;

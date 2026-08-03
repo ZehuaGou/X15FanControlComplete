@@ -32,7 +32,7 @@ namespace X15FanCore.Control
             FanProfile profile = new FanProfile
             {
                 Name = "代码",
-                Description = "代码固定策略：38W/55W，CPU性能上限95%，配套稳定风扇曲线。",
+                Description = "代码固定策略：38W/55W，正常声学预算69%；持续重负载可进入性能优先档。",
                 CouplingEnabled = false,
                 CouplingStartTemperatureC = 78,
                 CouplingMaximumPercent = 3
@@ -67,8 +67,8 @@ namespace X15FanCore.Control
             profile.Gpu.SlowEmaAlpha = 0.15;
 
             ApplySafetyPolicy(profile);
-            ApplyAcousticCandidates(profile.Cpu, 65, 80, 88);
-            ApplyAcousticCandidates(profile.Gpu, 65, 80, 88);
+            ApplyAcousticCandidates(profile.Cpu, 62, 69, 88);
+            ApplyAcousticCandidates(profile.Gpu, 62, 69, 88);
             return profile;
         }
 
@@ -77,7 +77,7 @@ namespace X15FanCore.Control
             FanProfile profile = new FanProfile
             {
                 Name = "日常",
-                Description = "日常固定策略：30W/45W，较代码档更低的稳定风扇曲线。",
+                Description = "日常固定策略：30W/45W，正常声学预算69%，优先避免突兀噪声。",
                 CouplingEnabled = false,
                 CouplingStartTemperatureC = 78,
                 CouplingMaximumPercent = 3
@@ -112,8 +112,8 @@ namespace X15FanCore.Control
             profile.Gpu.SlowEmaAlpha = 0.15;
 
             ApplySafetyPolicy(profile);
-            ApplyAcousticCandidates(profile.Cpu, 60, 71, 88);
-            ApplyAcousticCandidates(profile.Gpu, 60, 71, 88);
+            ApplyAcousticCandidates(profile.Cpu, 60, 69, 88);
+            ApplyAcousticCandidates(profile.Gpu, 60, 69, 88);
             return profile;
         }
 
@@ -201,7 +201,7 @@ namespace X15FanCore.Control
             FanProfile profile = new FanProfile
             {
                 Name = "重负载",
-                Description = "重负载固定策略：55W/69W，CPU性能上限100%，配套更积极的散热曲线。",
+                Description = "重负载性能优先：55W/69W，允许突破70%声学分界以保障持续工作。",
                 CouplingEnabled = true,
                 CouplingStartTemperatureC = 75,
                 CouplingMaximumPercent = 4
@@ -228,8 +228,9 @@ namespace X15FanCore.Control
         }
 
         // 声学预算候选值（仅供离线验证，未经硬件标定）：以旧策略
-        // "87°C 约 70% 可稳定"为锚点：Quiet ~62%、Daily ~71%、Code ~80%、
-        // Heavy ~88%。软上限不是安全上限，Emergency/快速升温/RPM 保护可突破。
+        // 声学预算：日常/代码正常阶段不超过 69%，避开本机约 70%
+        // 的明显噪声分界；Heavy 是持续强负载的性能逃生通道，保留 88%。
+        // 软上限不是安全上限，Emergency/快速升温/RPM 保护仍可突破。
         private static void ApplyAcousticCandidates(
             FanChannelProfile channel,
             double comfortFanDutyPercent,

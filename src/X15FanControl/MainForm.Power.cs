@@ -226,6 +226,9 @@ namespace X15FanControl
             {
                 CpuSaturated = _acousticGovernor != null && _acousticGovernor.CpuSaturated,
                 GpuSaturated = _acousticGovernor != null && _acousticGovernor.GpuSaturated,
+                // 传入协调器的 cpuRequested 已是 AcousticGovernor 输出的
+                // effective，禁止对同一 CPU 饱和证据重复降档。
+                CpuPowerAlreadyGoverned = true,
                 Emergency = decision != null &&
                     ((decision.Cpu != null && decision.Cpu.State == ControlState.Emergency) ||
                      (decision.Gpu != null && decision.Gpu.State == ControlState.Emergency))

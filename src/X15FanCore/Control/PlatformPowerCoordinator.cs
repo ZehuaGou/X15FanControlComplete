@@ -15,6 +15,9 @@ namespace X15FanCore.Control
         public bool CpuSaturated;      // CPU 通道热饱和（AcousticGovernor 判定）
         public bool GpuSaturated;      // GPU 通道热饱和
         public bool Emergency;         // 整机 Emergency（任一通道紧急散热）
+        // CPU 声学治理器已经将 requested 转换为 effective 时置 true，
+        // 避免协调器对同一次 CPU 饱和再降一档。
+        public bool CpuPowerAlreadyGoverned;
         // 共享热影响证据（全部满足才允许因 GPU 热饱和降低 CPU 档位）：
         public bool GpuTemperatureNearLimit;   // GPU 温度接近上限
         public bool GpuFanAtSoftMaximum;       // GPU 主风扇达到软上限
@@ -86,7 +89,8 @@ namespace X15FanCore.Control
             else
             {
                 // 1) CPU 自身热饱和：只降 CPU。
-                if (thermal.CpuSaturated && TierPower.IsHigherPowerTier(baseTier, AdaptivePowerTier.Quiet))
+                if (thermal.CpuSaturated && !thermal.CpuPowerAlreadyGoverned &&
+                    TierPower.IsHigherPowerTier(baseTier, AdaptivePowerTier.Quiet))
                 {
                     baseTier = TierPower.LowerTier(baseTier);
                     reason = "CPU 通道热饱和，CPU 有效档降低";

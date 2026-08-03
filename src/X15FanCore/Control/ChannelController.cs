@@ -14,6 +14,10 @@ namespace X15FanCore.Control
         // 跨风扇 Emergency 共享散热下限余量（%）：另一侧进入 Emergency 时，
         // 本通道目标不低于 软上限 + 该余量（候选值，未硬件标定）。
         private const double EmergencySharedBreakthroughMarginPercent = 5;
+        // 快速温升结束后不让较高的历史目标继续占用降速保持。
+        // 2%/s 从约 77% 回到 69% 需约 4 秒，避免噪声长时间滞留；
+        // Emergency/快速温升期间不使用该回归速率。
+        private const double AcousticCeilingReturnRatePercentPerSecond = 2.0;
         private bool _initialized;
         private double _acceptedTarget;
         private double _applied;
@@ -29,10 +33,10 @@ namespace X15FanCore.Control
 
         // Write verification
         private double _ecLastReadbackPercent;
-        private int _externalOverrideCount;
         private int _consecutiveMismatchCount;
         private double _lastWriteVerificationTarget;
         private bool _pendingWriteVerification;
+        private bool _lastWriteVerified;
 
         // Stable zone hysteresis
         private bool _inStableZone;
@@ -85,10 +89,10 @@ namespace X15FanCore.Control
             _lastRiseSampleUtc = DateTime.MinValue;
             _temperatureRiseRateCPerSec = 0;
             _ecLastReadbackPercent = 0;
-            _externalOverrideCount = 0;
             _consecutiveMismatchCount = 0;
             _lastWriteVerificationTarget = -1;
             _pendingWriteVerification = false;
+            _lastWriteVerified = false;
             _inStableZone = false;
             UpdateStableZoneThresholds();
         }
@@ -168,9 +172,11 @@ namespace X15FanCore.Control
             // 软上限而非安全上限——紧急档（直接设置 applied）、快速升温
             // 与 RPM 保护可以立即突破；emergencyOverride（跨风扇共同散热
             // 的 Emergency/快速温升保护）同样突破。
-            if (_profile.SoftMaximumFanDutyPercent < 100 &&
+            bool acousticCeilingActive = _profile.SoftMaximumFanDutyPercent > 0 &&
+                _profile.SoftMaximumFanDutyPercent < 100 &&
                 _temperatureRiseRateCPerSec <= _acousticFastRiseCPerSecond &&
-                !emergencyOverride)
+                !emergencyOverride;
+            if (acousticCeilingActive)
             {
                 rawTarget = Math.Min(rawTarget, _profile.SoftMaximumFanDutyPercent);
             }
@@ -254,6 +260,20 @@ namespace X15FanCore.Control
                     UpdateAcceptedTarget(rawTarget, controlTemperature, timestampUtc);
                 }
                 RampAppliedTarget(Math.Max(0.01, elapsedSeconds), emergencyBoostRate);
+
+                // 声学上限恢复后，立即废弃快速温升期间留下的超上限
+                // accepted target，不让 DownHold 把 76%~80% 的噪声再保持
+                // 15 秒或更久。Applied 以受限速率回归，不瞬间降扇。
+                if (acousticCeilingActive &&
+                    (_acceptedTarget > _profile.SoftMaximumFanDutyPercent ||
+                     _applied > _profile.SoftMaximumFanDutyPercent))
+                {
+                    _acceptedTarget = Math.Min(_acceptedTarget, _profile.SoftMaximumFanDutyPercent);
+                    _applied = Math.Max(
+                        _profile.SoftMaximumFanDutyPercent,
+                        _applied - AcousticCeilingReturnRatePercentPerSecond * Math.Max(0.01, elapsedSeconds));
+                    _pendingDownSinceUtc = null;
+                }
             }
 
             _acceptedTarget = Clamp(_acceptedTarget, 0, 100);
@@ -303,16 +323,28 @@ namespace X15FanCore.Control
             _lastWriteUtc = timestampUtc;
             _pendingWriteVerification = true;
             _lastWriteVerificationTarget = writtenPercent;
+            _lastWriteVerified = false;
         }
 
-        public void SetEcReadback(double readbackPercent)
+        public FanWriteReadbackStatus ObserveEcReadback(double readbackPercent)
         {
-            // Store the latest verified readback for diagnostics only.  All
-            // mismatch counting lives in CheckExternalOverride, which is the
-            // single owner of the override state machine; counting in two
-            // places inflated _consecutiveMismatchCount and made the override
-            // threshold fire early.
             _ecLastReadbackPercent = readbackPercent;
+            bool hasExpectedWrite = _initialized && _lastWritten >= 0;
+            bool verified = hasExpectedWrite && Math.Abs(readbackPercent - _lastWritten) <= 2.0;
+            bool overridden = hasExpectedWrite && CheckExternalOverride(readbackPercent);
+
+            if (verified)
+                _pendingWriteVerification = false;
+            _lastWriteVerified = verified;
+
+            return new FanWriteReadbackStatus
+            {
+                HasExpectedWrite = hasExpectedWrite,
+                ExpectedPercent = hasExpectedWrite ? _lastWritten : 0,
+                ObservedPercent = readbackPercent,
+                Verified = _lastWriteVerified,
+                ExternalOverrideDetected = overridden
+            };
         }
 
         public int ConsecutiveMismatchCount => _consecutiveMismatchCount;
@@ -326,14 +358,15 @@ namespace X15FanCore.Control
             if (diff > 3.0)
             {
                 _consecutiveMismatchCount++;
-                _externalOverrideCount++;
 
-                // 3 consecutive mismatches or total overrides > 10 = confirm override
-                return _consecutiveMismatchCount >= 3 || _externalOverrideCount > 10;
+                // Only a genuinely continuous mismatch proves that another
+                // controller is taking ownership.  Historical, isolated EC
+                // read glitches must never accumulate into a false fallback.
+                return _consecutiveMismatchCount >= 3;
             }
 
-            if (_consecutiveMismatchCount > 0)
-                _consecutiveMismatchCount--;
+            // A matching ordinary control snapshot breaks continuity.
+            _consecutiveMismatchCount = 0;
 
             return false;
         }

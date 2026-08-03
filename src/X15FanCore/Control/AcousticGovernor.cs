@@ -37,6 +37,9 @@ namespace X15FanCore.Control
         private AdaptivePowerTier _lastEffective = AdaptivePowerTier.Daily;
         private DateTime _lastSampleUtc = DateTime.MinValue;
         private string _reason = string.Empty;
+        // 受限期间已明确接受过更低请求后，Heavy 不得在同一热饱和
+        // 周期内立即回弹；必须完成冷却恢复后才重新开放性能逃生。
+        private bool _heavyEscapeBlockedUntilRecovery;
 
         public AcousticGovernor(AdaptivePowerSettings settings)
         {
@@ -100,6 +103,7 @@ namespace X15FanCore.Control
             _recoverySinceUtc = null;
             _lastEffective = tier;
             _reason = string.Empty;
+            _heavyEscapeBlockedUntilRecovery = false;
         }
 
         public AdaptivePowerTier Apply(
@@ -141,6 +145,8 @@ namespace X15FanCore.Control
             // 同步 _lastEffective。功耗接受降档，但紧急状态诊断必须保留。
             if (requestedTier < _lastEffective)
             {
+                if (_state != CoolingState.Normal || SaturationCreditSeconds > 0)
+                    _heavyEscapeBlockedUntilRecovery = true;
                 _lastEffective = requestedTier;
                 if (emergency)
                 {
@@ -230,6 +236,31 @@ namespace X15FanCore.Control
                           cpuFanDutyPercent <= cpu.SoftMaximumFanDutyPercent - _settings.RecoveryMarginPercent &&
                           gpuFanDutyPercent <= gpu.SoftMaximumFanDutyPercent - _settings.RecoveryMarginPercent;
 
+            // Heavy 是经过持续负载证据才能进入的性能逃生通道。日常/代码
+            // 的 69% 声学预算不得把真实持续强负载永久锁在低功耗档。
+            // Emergency 已在上方先行处理，仍保持“紧急时不升功耗”；
+            // SharedThermalShedding 仍由整机协调器在后续覆盖。
+            if (requestedTier == AdaptivePowerTier.Heavy && !_heavyEscapeBlockedUntilRecovery)
+            {
+                _lastEffective = AdaptivePowerTier.Heavy;
+                if (saturated)
+                {
+                    _state = CoolingState.ThermalSaturation;
+                    _reason = "持续重负载：性能优先，允许进入 Heavy 并使用其独立声学预算";
+                }
+                else if (saturationSeconds > 0)
+                {
+                    _state = CoolingState.NearAcousticLimit;
+                    _reason = "持续重负载：性能优先，从日常/代码声学限制中逃生";
+                }
+                else
+                {
+                    _state = CoolingState.Normal;
+                    _reason = "持续重负载：已进入性能优先档";
+                }
+                return _lastEffective;
+            }
+
             if (saturated)
             {
                 _recoverySinceUtc = null;
@@ -306,6 +337,7 @@ namespace X15FanCore.Control
                 _recoverySinceUtc = null;
                 _cpuSaturationCreditSeconds = 0;
                 _gpuSaturationCreditSeconds = 0;
+                _heavyEscapeBlockedUntilRecovery = false;
                 _reason = "声学/热恢复：温度稳定且风扇低于软上限，恢复正常";
                 return true;
             }
