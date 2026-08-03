@@ -9,7 +9,7 @@ namespace X15FanCore.Models
     {
         public AppConfig()
         {
-            ConfigVersion = 2;
+            ConfigVersion = 3;
             ActiveProfileName = "自动";
             StrategyMode = StrategyMode.Auto;
             StartupMode = RunMode.ReadOnly;

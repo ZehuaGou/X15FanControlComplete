@@ -12,6 +12,10 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "X15GpuTelemetry", "src\X15G
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "X15XtuBridge", "src\X15XtuBridge\X15XtuBridge.csproj", "{F67C4A0C-1B0D-4B6E-9A6E-CC4A4CC1DB6E}"
 EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "X15GpuPowerProbe", "src\X15GpuPowerProbe\X15GpuPowerProbe.csproj", "{1A2B3C4D-5E6F-4A8B-9C0D-1E2F3A4B5C6D}"
+EndProject
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "X15EcProbe", "src\X15EcProbe\X15EcProbe.csproj", "{2A3B4C5D-6E7F-4A8B-9C0D-1E2F3A4B5C6E}"
+EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "X15FanCore.Tests", "tests\X15FanCore.Tests\X15FanCore.Tests.csproj", "{71B9E603-4ED0-4BB1-AF31-0303947994D1}"
 EndProject
 Global

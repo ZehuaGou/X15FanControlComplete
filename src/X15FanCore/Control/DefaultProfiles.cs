@@ -67,6 +67,8 @@ namespace X15FanCore.Control
             profile.Gpu.SlowEmaAlpha = 0.15;
 
             ApplySafetyPolicy(profile);
+            ApplyAcousticCandidates(profile.Cpu, 65, 80, 88);
+            ApplyAcousticCandidates(profile.Gpu, 65, 80, 88);
             return profile;
         }
 
@@ -110,6 +112,8 @@ namespace X15FanCore.Control
             profile.Gpu.SlowEmaAlpha = 0.15;
 
             ApplySafetyPolicy(profile);
+            ApplyAcousticCandidates(profile.Cpu, 60, 71, 88);
+            ApplyAcousticCandidates(profile.Gpu, 60, 71, 88);
             return profile;
         }
 
@@ -147,6 +151,8 @@ namespace X15FanCore.Control
             profile.Gpu.SlowEmaAlpha = 0.15;
 
             ApplySafetyPolicy(profile);
+            ApplyAcousticCandidates(profile.Cpu, 55, 62, 85);
+            ApplyAcousticCandidates(profile.Gpu, 55, 62, 85);
             return profile;
         }
 
@@ -185,6 +191,8 @@ namespace X15FanCore.Control
             profile.Gpu.HysteresisC = 3;
 
             ApplySafetyPolicy(profile);
+            ApplyAcousticCandidates(profile.Cpu, 60, 71, 88);
+            ApplyAcousticCandidates(profile.Gpu, 60, 71, 88);
             return profile;
         }
 
@@ -214,7 +222,23 @@ namespace X15FanCore.Control
             profile.Gpu.HysteresisC = 2;
 
             ApplySafetyPolicy(profile);
+            ApplyAcousticCandidates(profile.Cpu, 70, 88, 88);
+            ApplyAcousticCandidates(profile.Gpu, 70, 88, 88);
             return profile;
+        }
+
+        // 声学预算候选值（仅供离线验证，未经硬件标定）：以旧策略
+        // "87°C 约 70% 可稳定"为锚点：Quiet ~62%、Daily ~71%、Code ~80%、
+        // Heavy ~88%。软上限不是安全上限，Emergency/快速升温/RPM 保护可突破。
+        private static void ApplyAcousticCandidates(
+            FanChannelProfile channel,
+            double comfortFanDutyPercent,
+            double softMaximumFanDutyPercent,
+            int targetTemperatureC)
+        {
+            channel.ComfortFanDutyPercent = comfortFanDutyPercent;
+            channel.SoftMaximumFanDutyPercent = softMaximumFanDutyPercent;
+            channel.TargetTemperatureC = targetTemperatureC;
         }
 
         // A profile can be edited in the UI, but it must never weaken the fan safety floor.

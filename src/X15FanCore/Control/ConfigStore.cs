@@ -130,6 +130,39 @@ namespace X15FanCore.Control
                 changed = true;
             }
 
+            if (config.ConfigVersion < 3)
+            {
+                // 从版本2升级：驻留时间细化为逐档位字段。旧 UpshiftDwellSeconds
+                // 映射到两个普通升档时间，旧 DownshiftDwellSeconds 映射到
+                // Code→Daily 和 Daily→Quiet，Heavy→Code 默认 60 秒。
+                // StrategyMode 仍是配置权威来源，此处不动。
+                AdaptivePowerSettings power = config.AdaptivePower ?? new AdaptivePowerSettings();
+                int oldUpshift = power.UpshiftDwellSeconds > 0 ? power.UpshiftDwellSeconds : 30;
+                int oldDownshift = power.DownshiftDwellSeconds > 0 ? power.DownshiftDwellSeconds : 120;
+                power.QuietToDailyDwellSeconds = 15;
+                power.DailyToCodeDwellSeconds = oldUpshift;
+                power.CodeToHeavyDwellSeconds = oldUpshift;
+                power.HeavyToCodeDwellSeconds = 60;
+                power.CodeToDailyDwellSeconds = oldDownshift;
+                power.DailyToQuietDwellSeconds = oldDownshift;
+                power.StrongUpshiftDwellSeconds = 12;
+                power.MinimumTierHoldSeconds = 20;
+                power.UpshiftEvidenceWindowSeconds = 8;
+                power.DownshiftAverageWindowSeconds = 30;
+                power.RecentPeakWindowSeconds = 15;
+                // AdaptivePower.Enabled 是权威启用字段；旧 AppConfig 级字段
+                // 若为 false 同步过来（默认两者都为 true）。
+                if (!config.AdaptivePowerEnabled)
+                    power.Enabled = false;
+                // 历史值 68.75W 显式迁移到安全预设 69W（Normalize 也会强制
+                // 对齐，这里让迁移结果可读）。
+                if (power.HeavyPl2Watts == 68.75m)
+                    power.HeavyPl2Watts = 69m;
+                config.AdaptivePower = power;
+                config.ConfigVersion = 3;
+                changed = true;
+            }
+
             // 对异常值进行规范化（无论版本）
             if (!Enum.IsDefined(typeof(RunMode), config.StartupMode))
             {

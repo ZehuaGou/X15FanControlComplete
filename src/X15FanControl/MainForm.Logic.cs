@@ -178,18 +178,6 @@ namespace X15FanControl
             Interlocked.Exchange(ref _lastEcActivityUtcTicks, DateTime.UtcNow.Ticks);
         }
 
-        private void EcRestoreCalibrationAuto(int channel)
-        {
-            ExecuteEc("RestoreCalibrationAuto", ec =>
-            {
-                ec.SetFanAuto(channel);
-                // RestoreAllAuto内部会容错吞掉单通道异常；这里显式写两个通道，
-                // 只有对应通道和另一个通道均未抛出时，才允许窗口状态继续变化。
-                ec.SetFanAuto(channel == 1 ? 2 : 1);
-                return true;
-            });
-        }
-
         // 异步EC访问版本（用于初始化路径，不阻塞UI线程）
         private async System.Threading.Tasks.Task<int> EcGetCountAsync()
         {
@@ -354,17 +342,6 @@ namespace X15FanControl
                 decision = _latestDecision;
             }
 
-            // 校准模式：UI Timer负责驱动校准（从后台快照取数据）
-            if (_calibrationActive)
-            {
-                if (snapshot != null)
-                {
-                    CalibrationTick(snapshot);
-                    UpdateDashboard(snapshot, null);
-                }
-                return;
-            }
-
             if (snapshot == null) return;
 
             // 标签刷新
@@ -418,25 +395,20 @@ namespace X15FanControl
 
                     DetectSensorStalls(snapshot);
 
-                    // Power policy is deliberately independent from the fan
-                    // safety controller. It may request a slower CPU state,
-                    // but temperature emergency stages below still ramp fans
-                    // immediately when needed.
-                    if (!_calibrationActive)
-                        UpdateAdaptivePowerPolicy(snapshot, now);
-
                     ControlDecision decision = null;
 
-                    if (_calibrationActive)
+                    lock (_engineLock)
                     {
-                        // Calibration runs on UI thread via timer; skip here
+                        decision = _engine.Update(snapshot);
                     }
-                    else
-                    {
-                        lock (_engineLock)
-                        {
-                            decision = _engine.Update(snapshot);
-                        }
+
+                        // Power policy is deliberately independent from the fan
+                        // safety controller. It may request a slower CPU state,
+                        // but temperature emergency stages below still ramp fans
+                        // immediately when needed.  Runs after the control
+                        // decision so the acoustic governor can see fan duty,
+                        // temperature slope and emergency state.
+                        UpdateAdaptivePowerPolicy(snapshot, decision, now);
 
                         // Publish the latest async write-verification outcome.
                         // The readback lags one control cycle by design: the
@@ -492,8 +464,22 @@ namespace X15FanControl
                             _heartbeat?.WriteActive(Process.GetCurrentProcess().Id);
                         }
 
-                        _csvLogger?.Write(snapshot, decision);
-                    }
+                        // CSV 记录：附加自动策略诊断（档位判定证据 + 声学治理
+                        // 有效档位/冷却状态）+ CPU/GPU 联合功耗运行时诊断，
+                        // 写入失败限频记录到应用日志。
+                        AdaptiveTierDiagnostics tierDiagnostics = _adaptivePowerTierController == null
+                            ? null
+                            : _adaptivePowerTierController.Diagnostics;
+                        if (tierDiagnostics != null)
+                        {
+                            tierDiagnostics.EffectiveTier = _adaptiveEffectiveTier;
+                            tierDiagnostics.CoolingState = _acousticGovernor == null
+                                ? CoolingState.Normal
+                                : _acousticGovernor.State;
+                        }
+                        JointRuntimeDiagnostics joint = BuildJointPowerDiagnostics(snapshot);
+                        _csvLogger?.Write(snapshot, decision, tierDiagnostics, _config.StrategyMode, joint);
+                        RecordCsvWriteErrorIfAny();
 
                     // 安全发布最新快照给UI线程
                     lock (_latestLock)
@@ -1154,7 +1140,8 @@ namespace X15FanControl
         {
             StrategyMode mode = _config == null ? StrategyMode.Auto : _config.StrategyMode;
             AdaptivePowerTier tier = _adaptiveCurrentTier;
-            AdaptivePowerPreset preset = AdaptivePowerPreset.For(tier);
+            // 功耗显示使用有效档位（声学/热治理后的实际应用档位）。
+            AdaptivePowerPreset preset = AdaptivePowerPreset.For(_adaptiveEffectiveTier, _config == null ? null : _config.AdaptivePower);
             string power = _adaptiveXtuConfirmed || _adaptiveBackendName.StartsWith("Windows", StringComparison.Ordinal)
                 ? "PL1 " + preset.Pl1Watts.ToString("0.#") + "W / PL2 " + preset.Pl2Watts.ToString("0.#") + "W / " + preset.TimeSeconds + "秒"
                 : "等待应用（目标 PL1 " + preset.Pl1Watts.ToString("0.#") + "W / PL2 " + preset.Pl2Watts.ToString("0.#") + "W）";
@@ -1167,7 +1154,9 @@ namespace X15FanControl
             SetLabelText(_strategyReasonValueLabel, _adaptiveLastReason ?? "等待硬件");
             SetLabelText(_strategyBackendValueLabel, backend);
             SetLabelText(_strategyCpuValueLabel, snapshot == null ? "—" : snapshot.CpuUtilizationPercent.ToString("0") + "%");
-            SetLabelText(_strategyGpuValueLabel, snapshot == null ? "—" : snapshot.GpuTelemetryUtilization.ToString("0") + "%");
+            SetLabelText(_strategyGpuValueLabel, snapshot == null
+                ? "仅监测"
+                : "监测 " + snapshot.GpuTelemetryUtilization.ToString("0") + "%");
             UpdateTrayStrategyStatus();
         }
 
@@ -1665,6 +1654,23 @@ namespace X15FanControl
             FlushLogQueue();
         }
 
+        private void RecordCsvWriteErrorIfAny()
+        {
+            if (_csvLogger == null)
+                return;
+
+            string error = _csvLogger.ConsumeLastWriteError();
+            if (string.IsNullOrEmpty(error))
+                return;
+
+            // 限频：同一持续错误最多每 30 秒记录一次，避免刷屏。
+            if ((DateTime.UtcNow - _lastCsvErrorLoggedUtc).TotalSeconds >= 30)
+            {
+                _lastCsvErrorLoggedUtc = DateTime.UtcNow;
+                AppendLog("CSV 写入错误：" + error);
+            }
+        }
+
         private void FlushLogQueue()
         {
             if (_logQueue.IsEmpty) return;
@@ -1777,26 +1783,7 @@ namespace X15FanControl
 
         private void MainFormResize(object sender, EventArgs e)
         {
-            // 最小化按钮：窗口进入任务栏，不隐藏到托盘
-            if (WindowState == FormWindowState.Minimized)
-            {
-                if (_calibrationActive)
-                {
-                    if (!StopCalibration("窗口最小化"))
-                    {
-                        WindowState = FormWindowState.Normal;
-                        MessageBox.Show(
-                            "恢复自动失败，窗口不会最小化。请使用“恢复自动”并检查 EC 日志。",
-                            "声学校准",
-                            MessageBoxButtons.OK,
-                            MessageBoxIcon.Error);
-                        return;
-                    }
-
-                    NotifyCalibrationWindowActionStopped();
-                }
-                // ShowInTaskbar保持true，用户可点击任务栏恢复
-            }
+            // 最小化按钮保留在任务栏；关闭按钮才隐藏到托盘。
         }
 
         private void SystemEventsPowerModeChanged(object sender, PowerModeChangedEventArgs e)
@@ -1816,19 +1803,8 @@ namespace X15FanControl
 
             if (e.Mode == PowerModes.Suspend)
             {
-                if (_calibrationActive)
-                {
-                    if (!StopCalibration("系统休眠"))
-                    {
-                        try { EcRestoreAllAuto(); }
-                        catch (Exception ex) { AppendLog("休眠前恢复自动失败：" + ex.Message); }
-                    }
-                }
-                else
-                {
-                    RestoreAuto("系统休眠");
-                    StopWatchdog();
-                }
+                RestoreAuto("系统休眠");
+                StopWatchdog();
             }
             else if (e.Mode == PowerModes.Resume)
             {
@@ -1892,9 +1868,6 @@ namespace X15FanControl
 
             AppendLog("Control loop cancellation requested");
             _controlCts?.Cancel();
-
-            // 停止校准（防止校准中隐藏导致固定占空比）
-            try { StopCalibration("退出"); } catch { }
 
             // 等待后台控制循环实际结束（最多3秒）
             bool controlStopped = false;

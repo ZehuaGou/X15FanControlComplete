@@ -1,3 +1,5 @@
+using X15FanCore.Models;
+
 namespace X15FanCore.Control
 {
     public sealed class AdaptivePowerPreset
@@ -7,19 +9,39 @@ namespace X15FanCore.Control
         public uint TimeSeconds { get; private set; }
         public int WindowsMaximumPerformancePercent { get; private set; }
 
+        // 兼容入口：使用默认配置。生产路径必须传真实配置，禁止硬编码。
         public static AdaptivePowerPreset For(AdaptivePowerTier tier)
         {
+            return For(tier, null);
+        }
+
+        // 功耗参数固定来自 AdaptivePowerPresets 安全预设（与桥接白名单共享
+        // 同一定义），不允许用配置中的任意功耗值绕过桥接安全校验。
+        public static AdaptivePowerPreset For(AdaptivePowerTier tier, AdaptivePowerSettings settings)
+        {
+            AdaptivePowerPresets.Preset preset;
             switch (tier)
             {
                 case AdaptivePowerTier.Quiet:
-                    return new AdaptivePowerPreset { Pl1Watts = 25, Pl2Watts = 35, TimeSeconds = 28, WindowsMaximumPerformancePercent = 75 };
+                    preset = AdaptivePowerPresets.Quiet;
+                    break;
                 case AdaptivePowerTier.Code:
-                    return new AdaptivePowerPreset { Pl1Watts = 38, Pl2Watts = 55, TimeSeconds = 28, WindowsMaximumPerformancePercent = 95 };
+                    preset = AdaptivePowerPresets.Code;
+                    break;
                 case AdaptivePowerTier.Heavy:
-                    return new AdaptivePowerPreset { Pl1Watts = 55, Pl2Watts = 69, TimeSeconds = 28, WindowsMaximumPerformancePercent = 100 };
+                    preset = AdaptivePowerPresets.Heavy;
+                    break;
                 default:
-                    return new AdaptivePowerPreset { Pl1Watts = 30, Pl2Watts = 45, TimeSeconds = 28, WindowsMaximumPerformancePercent = 85 };
+                    preset = AdaptivePowerPresets.Daily;
+                    break;
             }
+            return new AdaptivePowerPreset
+            {
+                Pl1Watts = preset.Pl1Watts,
+                Pl2Watts = preset.Pl2Watts,
+                TimeSeconds = preset.TimeSeconds,
+                WindowsMaximumPerformancePercent = preset.WindowsMaximumPerformancePercent
+            };
         }
     }
 }

@@ -18,51 +18,58 @@ namespace X15FanControl
             Mutex ecMutex = null;
             bool ownsMutex = false;
             bool abandoned = false;
+            bool uiPreviewRequested = Array.Exists(args, arg =>
+                arg.Equals("--ui-preview", StringComparison.OrdinalIgnoreCase));
 
-            try
+            // UI preview renders layout only: it must neither acquire the EC
+            // mutex nor block the real controller from starting.
+            if (!uiPreviewRequested)
             {
-                ecMutex = new Mutex(false, EcMutexName);
-
                 try
                 {
-                    // 立即尝试获取，不等待
-                    ownsMutex = ecMutex.WaitOne(0, false);
-                }
-                catch (AbandonedMutexException)
-                {
-                    // 上一个进程异常退出，我们取得所有权
-                    ownsMutex = true;
-                    abandoned = true;
-                }
+                    ecMutex = new Mutex(false, EcMutexName);
 
-                if (!ownsMutex)
+                    try
+                    {
+                        // 立即尝试获取，不等待
+                        ownsMutex = ecMutex.WaitOne(0, false);
+                    }
+                    catch (AbandonedMutexException)
+                    {
+                        // 上一个进程异常退出，我们取得所有权
+                        ownsMutex = true;
+                        abandoned = true;
+                    }
+
+                    if (!ownsMutex)
+                    {
+                        if (args.Length > 0)
+                        {
+                            Console.Error.WriteLine("错误：另一个 X15FanControl 实例正在运行。");
+                            Console.Error.WriteLine("请先关闭已有实例再重试。");
+                            return 2;
+                        }
+                        else
+                        {
+                            MessageBox.Show("X15 风扇控制已在运行中。", "X15 风扇控制",
+                                MessageBoxButtons.OK, MessageBoxIcon.Information);
+                            return 1;
+                        }
+                    }
+                }
+                catch (Exception ex)
                 {
                     if (args.Length > 0)
                     {
-                        Console.Error.WriteLine("错误：另一个 X15FanControl 实例正在运行。");
-                        Console.Error.WriteLine("请先关闭已有实例再重试。");
-                        return 2;
+                        Console.Error.WriteLine($"无法创建EC互斥锁: {ex.Message}");
+                        return 1;
                     }
                     else
                     {
-                        MessageBox.Show("X15 风扇控制已在运行中。", "X15 风扇控制",
-                            MessageBoxButtons.OK, MessageBoxIcon.Information);
+                        MessageBox.Show($"无法创建EC互斥锁: {ex.Message}", "X15 风扇控制",
+                            MessageBoxButtons.OK, MessageBoxIcon.Error);
                         return 1;
                     }
-                }
-            }
-            catch (Exception ex)
-            {
-                if (args.Length > 0)
-                {
-                    Console.Error.WriteLine($"无法创建EC互斥锁: {ex.Message}");
-                    return 1;
-                }
-                else
-                {
-                    MessageBox.Show($"无法创建EC互斥锁: {ex.Message}", "X15 风扇控制",
-                        MessageBoxButtons.OK, MessageBoxIcon.Error);
-                    return 1;
                 }
             }
 
@@ -89,6 +96,7 @@ namespace X15FanControl
                 // Parse GUI-specific flags that don't block GUI mode
                 bool startMinimized = false;
                 bool isAutoStart = false;
+                bool uiPreview = false;
                 var cliArgs = new List<string>();
                 foreach (string arg in args)
                 {
@@ -96,6 +104,8 @@ namespace X15FanControl
                         startMinimized = true;
                     else if (arg.Equals("--autostart", StringComparison.OrdinalIgnoreCase))
                         isAutoStart = true;
+                    else if (arg.Equals("--ui-preview", StringComparison.OrdinalIgnoreCase))
+                        uiPreview = true;
                     else
                         cliArgs.Add(arg);
                 }
@@ -150,7 +160,7 @@ namespace X15FanControl
                     }
                 };
 
-                Application.Run(new MainForm(startMinimized, isAutoStart));
+                Application.Run(new MainForm(startMinimized, isAutoStart, uiPreview));
             }
             finally
             {

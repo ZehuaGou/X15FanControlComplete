@@ -1,0 +1,19 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <LangVersion>7.3</LangVersion>
+    <AssemblyName>X15DchuProbe</AssemblyName>
+    <RootNamespace>X15DchuProbe</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- Read-only DCHU AppSettings probe. Only calls ReadAppSettings (exported by
+         InsydeDCHU.dll). NEVER calls SetDCHU_Data / WriteAppSettings / Apply /
+         Restore. Used to snapshot page5 offset20/22 (GPU CoreOC/MEMOC stored
+         values) and page1 offset1 (OEM mode byte) during mode-switch tracking. -->
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+  </ItemGroup>
+</Project>

@@ -31,6 +31,13 @@ namespace X15FanCore.Models
             EmergencyStage1Percent = 75;
             EmergencyStage2TemperatureC = 92;
             EmergencyStage2Percent = 100;
+            // 声学预算参数（软上限，候选值待硬件标定）：
+            // ComfortFanDutyPercent 舒适占空；SoftMaximumFanDutyPercent 声学
+            // 软上限（Emergency/快速升温/RPM 保护可突破）；TargetTemperatureC
+            // 目标温度（低于它视为有散热余量）。
+            ComfortFanDutyPercent = 50;
+            SoftMaximumFanDutyPercent = 100;
+            TargetTemperatureC = 88;
         }
 
         [DataMember(Order = 1)]
@@ -105,5 +112,16 @@ namespace X15FanCore.Models
 
         [DataMember(Order = 24)]
         public double EmergencyStage3Percent { get; set; }
+
+        // 声学预算（软上限，非安全上限）：风扇曲线目标受 SoftMaximumFanDutyPercent
+        // 约束；Emergency、快速升温与 RPM 保护可以立即突破。
+        [DataMember(Order = 25)]
+        public double ComfortFanDutyPercent { get; set; }
+
+        [DataMember(Order = 26)]
+        public double SoftMaximumFanDutyPercent { get; set; }
+
+        [DataMember(Order = 27)]
+        public int TargetTemperatureC { get; set; }
     }
 }

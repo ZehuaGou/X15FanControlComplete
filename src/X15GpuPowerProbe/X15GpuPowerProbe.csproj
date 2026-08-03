@@ -1,0 +1,18 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <PlatformTarget>x64</PlatformTarget>
+    <Prefer32Bit>false</Prefer32Bit>
+    <LangVersion>7.3</LangVersion>
+    <AssemblyName>X15GpuPowerProbe</AssemblyName>
+    <RootNamespace>X15GpuPowerProbe</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 本机 nvml.dll 仅 64 位，而 X15FanCore.dll 为 x86 构建。验收工具
+         （x64）直接链接 NvmlShim.cs 源码，避免加载不匹配程序集。 -->
+    <Compile Include="..\X15FanCore\Control\NvmlShim.cs" Link="NvmlShim.cs" />
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+  </ItemGroup>
+</Project>

@@ -23,3 +23,7 @@ run-test.ps1
 # Third-party binary: user must copy from Brz installation
 vendor/ClevoEcInfo.dll
 dist/ClevoEcInfo.dll
+
+# Session/evidence directories (not for public repo)
+.omo/
+artifacts/

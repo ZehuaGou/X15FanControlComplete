@@ -8,6 +8,12 @@ namespace X15FanCore.Control
         private readonly FanKind _fanKind;
         private readonly TemperatureFilter _filter;
         private FanChannelProfile _profile;
+        // 声学软上限的快速升温突破阈值（°C/s）：温升率超过它时曲线目标
+        // 不受软上限约束，保证快速升温安全。由 MainForm 按配置注入。
+        private double _acousticFastRiseCPerSecond = 1.0;
+        // 跨风扇 Emergency 共享散热下限余量（%）：另一侧进入 Emergency 时，
+        // 本通道目标不低于 软上限 + 该余量（候选值，未硬件标定）。
+        private const double EmergencySharedBreakthroughMarginPercent = 5;
         private bool _initialized;
         private double _acceptedTarget;
         private double _applied;
@@ -45,6 +51,24 @@ namespace X15FanCore.Control
             _profile = profile ?? throw new ArgumentNullException("profile");
             _filter.Configure(profile.FilterWindowSamples, profile.FastEmaAlpha, profile.SlowEmaAlpha);
             UpdateStableZoneThresholds();
+        }
+
+        // 换档保留状态版本：更新曲线/速率/稳定区/紧急阈值，但保留
+        // _applied、_acceptedTarget、滤波 EMA 与窗口、_lastWritten、
+        // _lastWriteUtc 和外部覆盖计数。新曲线目标通过正常 ramp 爬升，
+        // 不会因换档直接跳到新曲线值。
+        public void SetProfilePreservingState(FanChannelProfile profile)
+        {
+            _profile = profile ?? throw new ArgumentNullException("profile");
+            _filter.Configure(profile.FilterWindowSamples, profile.FastEmaAlpha, profile.SlowEmaAlpha);
+            UpdateStableZoneThresholds();
+        }
+
+        // 注入声学软上限的快速升温突破阈值（来自 AdaptivePowerSettings）。
+        public void SetAcousticFastRiseBreakthrough(double cPerSecond)
+        {
+            if (cPerSecond > 0)
+                _acousticFastRiseCPerSecond = cPerSecond;
         }
 
         public void Reset()
@@ -86,9 +110,10 @@ namespace X15FanCore.Control
         public ChannelDecision Update(
             int instantTemperatureC,
             int currentDutyPercent,
-            double couplingAdditionPercent,
+            double assistAdditionPercent,
             DateTime timestampUtc,
-            double elapsedSeconds)
+            double elapsedSeconds,
+            bool emergencyOverride = false)
         {
             ChannelDecision decision = new ChannelDecision
             {
@@ -137,8 +162,27 @@ namespace X15FanCore.Control
             }
 
             double rawTarget = FanCurve.Interpolate(_profile.Curve, controlTemperature);
-            rawTarget = Clamp(rawTarget + Math.Max(0, couplingAdditionPercent), 0, 100);
+            rawTarget = Clamp(rawTarget + Math.Max(0, assistAdditionPercent), 0, 100);
             rawTarget = ApplyStableZone(rawTarget);
+            // 声学软上限：曲线目标受 SoftMaximumFanDutyPercent 约束。这是
+            // 软上限而非安全上限——紧急档（直接设置 applied）、快速升温
+            // 与 RPM 保护可以立即突破；emergencyOverride（跨风扇共同散热
+            // 的 Emergency/快速温升保护）同样突破。
+            if (_profile.SoftMaximumFanDutyPercent < 100 &&
+                _temperatureRiseRateCPerSec <= _acousticFastRiseCPerSecond &&
+                !emergencyOverride)
+            {
+                rawTarget = Math.Min(rawTarget, _profile.SoftMaximumFanDutyPercent);
+            }
+
+            // 共享散热增强（跨风扇 Emergency，当前周期生效）：本通道未达自身
+            // 紧急阈值但另一通道进入 Emergency 时，目标不得低于软上限 + 余量
+            // ——两个风扇在同一周期内共同散热、突破软上限（不依赖上一周期
+            // ChannelDecision）。应用值仍按正常 ramp 爬升，不跳变。
+            if (emergencyOverride && !IsOwnEmergency(instantTemperatureC))
+            {
+                rawTarget = Math.Max(rawTarget, _profile.SoftMaximumFanDutyPercent + EmergencySharedBreakthroughMarginPercent);
+            }
             decision.RawTargetPercent = rawTarget;
 
             // Determine effective ramp rates based on temperature velocity
@@ -409,6 +453,13 @@ namespace X15FanCore.Control
         private bool IsTemperatureValid(int temperatureC)
         {
             return temperatureC >= _profile.MinimumValidTemperatureC && temperatureC <= _profile.MaximumValidTemperatureC;
+        }
+
+        // 本通道自身是否达到紧急阈值（用于区分「自己紧急」与「另一侧紧急」）。
+        private bool IsOwnEmergency(int instantTemperatureC)
+        {
+            return _profile.EmergencyStage1TemperatureC > 0 &&
+                   instantTemperatureC >= _profile.EmergencyStage1TemperatureC;
         }
 
         private static double Clamp(double value, double minimum, double maximum)

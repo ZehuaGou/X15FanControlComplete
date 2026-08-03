@@ -1,0 +1,21 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>Exe</OutputType>
+    <TargetFramework>net48</TargetFramework>
+    <PlatformTarget>x86</PlatformTarget>
+    <Prefer32Bit>true</Prefer32Bit>
+    <LangVersion>7.3</LangVersion>
+    <AssemblyName>X15EcProbe</AssemblyName>
+    <RootNamespace>X15EcProbe</RootNamespace>
+  </PropertyGroup>
+  <ItemGroup>
+    <!-- 只复用 EC 原生封装(ClevoEcInfo.dll 为 32 位, 故本工具 x86)。
+         白名单调用: Initialize(构造器) / GetFanCount / ReadRaw / GetCpuRpm / GetGpuRpm / Dispose。
+         禁止任何 Set/Write/Apply/Restore/ChannelController/Lease/看门狗。 -->
+    <Compile Include="..\X15FanCore\Native\ClevoEcInfo.cs" Link="ClevoEcInfo.cs" />
+    <!-- E0 采集合同（采样内中止 + RPM 合理性诊断；与测试项目共享同一源码） -->
+    <Compile Include="..\X15FanCore\Probe\EcProbeContract.cs" Link="EcProbeContract.cs" />
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+  </ItemGroup>
+</Project>

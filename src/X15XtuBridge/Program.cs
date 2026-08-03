@@ -196,13 +196,11 @@ namespace X15XtuBridge
             Console.WriteLine(key + "=" + (value ?? string.Empty));
         }
 
+        // 安全白名单：与主程序共享 AdaptivePowerPresets 定义，只接受四组
+        // 固定预设（PL1/PL2/TimeSeconds 全部匹配），不允许任意功耗值。
         private static bool IsFixedStrategyPreset(decimal pl1, decimal pl2, uint timeSeconds)
         {
-            return timeSeconds == 28 &&
-                ((pl1 == 25m && pl2 == 35m) ||
-                 (pl1 == 30m && pl2 == 45m) ||
-                 (pl1 == 38m && pl2 == 55m) ||
-                 (pl1 == 55m && pl2 == 69m));
+            return AdaptivePowerPresets.IsSafePreset(pl1, pl2, timeSeconds);
         }
 
         private static bool IsRestorablePowerState(decimal pl1, decimal pl2, uint timeSeconds)

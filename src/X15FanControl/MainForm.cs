@@ -93,6 +93,7 @@ namespace X15FanControl
 
         // Window behavior
         private bool _explicitExitRequested;
+        private readonly bool _uiPreview;
         private bool _trayHintShown;
         private bool _startMinimizedToTray;
         private bool _isAutoStart;
@@ -105,6 +106,7 @@ namespace X15FanControl
 
         // Async logging
         private readonly ConcurrentQueue<string> _logQueue = new ConcurrentQueue<string>();
+        private DateTime _lastCsvErrorLoggedUtc = DateTime.MinValue;
         // UI log lines wait in their own queue and are appended in batches:
         // per-line BeginInvoke under write-verification logging (2-4 lines/s)
         // piled up UI thread messages and made the window sluggish.
@@ -134,6 +136,47 @@ namespace X15FanControl
         private AdaptivePowerTierController _adaptivePowerTierController;
         private AdaptivePowerTier _adaptiveAppliedTier = (AdaptivePowerTier)(-1);
         private AdaptivePowerTier _adaptiveCurrentTier = AdaptivePowerTier.Daily;
+        // 解耦后的状态：desired=状态机判定；fan=风扇曲线已切换档位；
+        // pending=功耗应用进行中的档位。旧异步应用完成后不得覆盖新档位。
+        private AdaptivePowerTier _adaptiveDesiredTier = AdaptivePowerTier.Daily;
+        private AdaptivePowerTier? _adaptivePendingApplyTier;
+        private int _adaptiveApplyGeneration;
+        // 声学/热治理：有效功耗/风扇档位与冷却状态。
+        private AcousticGovernor _acousticGovernor;
+        private AdaptivePowerTier _adaptiveEffectiveTier = AdaptivePowerTier.Daily;
+        // CPU/GPU 联合控制（架构收束 2026-08-02，生产 GPU 路径固定
+        // TelemetryOnly）：
+        // - _gpuThermalDemandController：GPU 热需求状态机（仅 GPU 利用率/
+        //   实际功耗遥测/温度/持续时间/滞回；输出需求等级，不输出功率档）；
+        // - _platformPowerCoordinator：输出 CPU effective（GPU 无有效功率档）；
+        // - _gpuPowerBackend：生产路径固定 TelemetryOnlyGpuPowerBackend
+        //   （零 Set；MainForm 不得实例化可写 NVML 后端）；
+        // - _gpuThermalDemand：GPU 热需求等级（风扇偏置/辅助判定/诊断）。
+        private GpuThermalDemandController _gpuThermalDemandController;
+        private PlatformPowerCoordinator _platformPowerCoordinator;
+        private IGpuPowerBackend _gpuPowerBackend;
+        private GpuThermalDemand _gpuThermalDemand = GpuThermalDemand.Low;
+        private string _gpuBackendDetail = "GPU 功耗后端未初始化";
+        // 共享热预算让出（2026-08-03，仅 Auto 模式）：GPU 接近热上限 + GPU
+        // 风扇接近全速 + CPU 同步高热持续 20s → CPU 有效功耗至多 Quiet，
+        // 为 GPU 与共享热管让出热预算；冷却稳定 60s 后恢复。CPU 功耗档与
+        // 风扇 profile 档解耦：让出期间风扇曲线保持进入前档位（下限）。
+        private SharedThermalBudgetController _sharedThermalBudget;
+        private bool _sharedThermalFanFloorSet;
+        private AdaptivePowerTier _sharedThermalFanFloor = AdaptivePowerTier.Daily;
+        // OEM mode 只读观测（DCHU page1 offset1）：只记录日志/诊断，绝不
+        // 自动写回或触发档位重映射。
+        private readonly OemModeObserver _oemModeObserver = new OemModeObserver();
+        // CPU 功耗 requested/readback（W/秒），供 CSV/日志记录。
+        private double _cpuPl1RequestedWatts;
+        private double _cpuPl2RequestedWatts;
+        private double _cpuTauRequestedSeconds;
+        private double _cpuPl1ReadbackWatts;
+        private double _cpuPl2ReadbackWatts;
+        private double _cpuTauReadbackSeconds;
+        // AUTO_TIER 事件日志去重：只在状态变化时记录
+        private AdaptivePowerTier _lastLoggedTier = (AdaptivePowerTier)(-1);
+        private AdaptivePowerTier? _lastLoggedPending;
         private bool _adaptiveXtuConfirmed;
         private bool _adaptiveDchuOriginalCaptured;
         private int _adaptiveDchuOriginalPl1;
@@ -195,30 +238,14 @@ namespace X15FanControl
         private TextBox _logTextBox;
         private TabControl _mainTabs;
 
-        private ComboBox _calibrationFanCombo;
-        private NumericUpDown _calibrationStart;
-        private NumericUpDown _calibrationEnd;
-        private NumericUpDown _calibrationStep;
-        private NumericUpDown _calibrationHold;
-        private Button _calibrationStartButton;
-        private Button _calibrationStopButton;
-        private Button _calibrationMarkNoisyButton;
-        private Button _calibrationMarkStableButton;
-        private Button _calibrationGenerateZoneButton;
-        private Label _calibrationStatusLabel;
-        private ListBox _calibrationRecordsList;
-        private volatile bool _calibrationActive;
-        private volatile FanKind _calibrationFan;
-        private volatile int _calibrationCurrentDuty;
-        private DateTime _calibrationStepStartedUtc;
-        private readonly List<CalibrationRecord> _calibrationRecords = new List<CalibrationRecord>();
         private FanSnapshot _lastSnapshot;
 
         public MainForm(bool startMinimized = false, bool isAutoStart = false, bool uiPreview = false)
         {
             _startMinimizedToTray = startMinimized;
             _isAutoStart = isAutoStart;
-            Text = "X15 风扇控制 — 静音稳定控制器";
+            _uiPreview = uiPreview;
+            Text = "X15 Thermal Control";
             try
             {
                 Icon = System.Drawing.Icon.ExtractAssociatedIcon(Application.ExecutablePath);
@@ -228,8 +255,8 @@ namespace X15FanControl
                 Icon = SystemIcons.Application;
             }
             StartPosition = FormStartPosition.CenterScreen;
-            MinimumSize = new Size(1080, 720);
-            Size = new Size(1250, 820);
+            MinimumSize = new Size(1080, 700);
+            Size = new Size(1240, 790);
             Font = new Font("Segoe UI", 9F);
             BackColor = SystemColors.Control;
             DoubleBuffered = true;
@@ -246,7 +273,8 @@ namespace X15FanControl
             Directory.CreateDirectory(_dataDirectory);
 
             BuildUserInterface();
-            BuildTrayIcon();
+            if (!uiPreview)
+                BuildTrayIcon();
 
             _mainTimer = new Timer();
             _mainTimer.Tick += MainTimerTick;
@@ -287,15 +315,42 @@ namespace X15FanControl
                 AppendLog(controlCenterDiagnostic);
                 _controlCenterLease = null;
             }
-            _adaptivePowerTierController = new AdaptivePowerTierController();
+            _adaptivePowerTierController = new AdaptivePowerTierController(_config.AdaptivePower);
+            _acousticGovernor = new AcousticGovernor(_config.AdaptivePower);
+            // CPU/GPU 联合控制（架构收束 2026-08-02）：GPU 热需求状态机 +
+            // CPU 协调器；GPU 功耗后端生产路径固定 TelemetryOnly（零 Set）。
+            _gpuThermalDemandController = new GpuThermalDemandController();
+            _platformPowerCoordinator = new PlatformPowerCoordinator();
+            _gpuPowerBackend = ProductionGpuBackendFactory.Create();
+            _gpuBackendDetail = _gpuPowerBackend == null
+                ? "GPU 功耗后端未初始化"
+                : "GPU 功耗后端=" + (_gpuPowerBackend.Name ?? "?") + "（生产路径 TelemetryOnly，零 GPU Set）";
+            // 共享热预算让出：温度有效性范围来自活动 profile 的安全地板
+            //（各档位共用；仅作遥测 min/max 校验，不随档位变化）。
+            FanProfile budgetProfile = GetActiveProfile();
+            _sharedThermalBudget = new SharedThermalBudgetController(
+                budgetProfile.Cpu.MinimumValidTemperatureC,
+                budgetProfile.Cpu.MaximumValidTemperatureC,
+                budgetProfile.Gpu.MinimumValidTemperatureC,
+                budgetProfile.Gpu.MaximumValidTemperatureC);
             InitializeAdaptivePowerCounters();
 
             PopulateModeCombo();
             PopulateProfiles();
             FanProfile profile = GetActiveProfile();
-            _engine = new FanControlEngine(profile);
-            LoadProfileIntoEditor(profile);
-
+            // 跨风扇辅助参数（架构收束；候选值，未硬件标定）。
+            CrossFanAssistSettings assistSettings = null;
+            if (_config.AdaptivePower.CrossFanAssistEnabled)
+            {
+                assistSettings = new CrossFanAssistSettings
+                {
+                    AssistRatio = Math.Max(0.1, Math.Min(0.5, _config.AdaptivePower.CrossFanAssistRatioPercent / 100.0)),
+                    EngageSustainedSeconds = Math.Max(5, _config.AdaptivePower.CrossFanAssistEngageSeconds),
+                    ExitStableSeconds = Math.Max(10, _config.AdaptivePower.CrossFanAssistExitStableSeconds)
+                };
+            }
+            _engine = new FanControlEngine(profile, assistSettings);
+            _engine.SetAcousticFastRiseBreakthrough(_config.AdaptivePower.FastRiseBreakthroughCPerSecond);
             _runMode = _config.StartupMode == RunMode.Active ? RunMode.ReadOnly : _config.StartupMode;
             _modeCombo.SelectedItem = _runMode;
             UpdateModeStatus();
@@ -471,6 +526,10 @@ namespace X15FanControl
 
             await ProbeIntelXtuBridgeAsync();
 
+            // 3.5 CPU/GPU 联合功耗控制：初始化真实 NVML 后端（默认 TelemetryOnly，
+            // 写保持禁用；NVML 不支持时程序仍正常控制 CPU 与两个风扇）。
+            InitializeGpuPowerBackend();
+
             // 4. 启动UI刷新定时器（不再负责硬件控制）
             Invoke(new Action(() =>
             {
@@ -533,11 +592,21 @@ namespace X15FanControl
                 foreach (string line in output.Split(new[] { '\r', '\n' }, StringSplitOptions.RemoveEmptyEntries))
                 {
                     AppendLog("Intel XTU 桥接：" + line);
+                    const string modePrefix = "DCHU_POWER_MODE=";
                     const string pl1Prefix = "DCHU_PL1_WATTS=";
                     const string pl2Prefix = "DCHU_PL2_WATTS=";
                     const string timePrefix = "DCHU_TIME_SECONDS=";
                     int value;
                     uint timeValue;
+                    // OEM mode 只读观测（架构收束）：只记录日志/诊断，绝不
+                    // 自动写回 page1 offset1，也不触发档位重映射。
+                    if (line.StartsWith(modePrefix, StringComparison.OrdinalIgnoreCase) &&
+                        int.TryParse(line.Substring(modePrefix.Length), out value))
+                    {
+                        _oemModeObserver.Observe(value);
+                        if (!string.IsNullOrEmpty(_oemModeObserver.LastTransition))
+                            AppendLog("OEM mode 观测（只读记录，不写回）：" + _oemModeObserver.LastTransition);
+                    }
                     if (line.StartsWith(pl1Prefix, StringComparison.OrdinalIgnoreCase) &&
                         int.TryParse(line.Substring(pl1Prefix.Length), out value))
                         _adaptiveDchuOriginalPl1 = value;
@@ -570,6 +639,7 @@ namespace X15FanControl
                         _adaptiveCurrentTier = detectedTier;
                         _adaptiveAppliedTier = (AdaptivePowerTier)(-1);
                         _adaptivePowerTierController?.ForceTier(detectedTier, "自动策略从当前 DCHU 档位开始");
+                        _acousticGovernor?.Reset(detectedTier);
                         ApplyFixedFanProfile(detectedTier);
                         AppendLog("自动策略起始档位：根据启动前 DCHU 识别为" + GetCurrentStrategyLevelName(StrategyMode.Auto, detectedTier) + "。");
                     }
@@ -610,6 +680,36 @@ namespace X15FanControl
             catch
             {
                 _cpuPerformanceCounter = null;
+            }
+        }
+
+        // 初始化生产 GPU 功耗后端：固定 TelemetryOnly（架构收束 2026-08-02）。
+        // 真实 NVML 后端（NvidiaNvmlPowerLimitBackend）与 X15GpuPowerProbe
+        // 保留为诊断代码，但生产 MainForm 绝不实例化可写后端，也不调用
+        // 任何 GPU Set（NVML SetPowerLimit/OC/Offset/VF/Lock/GC6 均禁止）。
+        private void InitializeGpuPowerBackend()
+        {
+            try
+            {
+                _gpuPowerBackend = ProductionGpuBackendFactory.Create();
+                if (_gpuPowerBackend == null)
+                {
+                    _gpuBackendDetail = "GPU 功耗后端未初始化";
+                }
+                else
+                {
+                    BackendProbeResult probe = _gpuPowerBackend.ProbeCapabilities();
+                    _gpuBackendDetail = "GPU 功耗后端=" + _gpuPowerBackend.Name +
+                        "；" + (probe == null ? "probe 无结果" : probe.Detail) +
+                        "；生产路径 TelemetryOnly，GPU Set 调用数恒为 0";
+                }
+                AppendLog(_gpuBackendDetail);
+            }
+            catch (Exception ex)
+            {
+                _gpuPowerBackend = null;
+                _gpuBackendDetail = "GPU 功耗后端初始化异常（" + ex.Message + "），GPU 保持 TelemetryOnly";
+                AppendLog(_gpuBackendDetail);
             }
         }
 
@@ -675,22 +775,6 @@ namespace X15FanControl
 
         private void HideToTray()
         {
-            // 校准中不能隐藏到托盘：先停止校准并恢复风扇Auto
-            if (_calibrationActive)
-            {
-                if (!StopCalibration("窗口隐藏"))
-                {
-                    MessageBox.Show(
-                        "恢复自动失败，窗口不会隐藏。请使用“恢复自动”并检查 EC 日志。",
-                        "声学校准",
-                        MessageBoxButtons.OK,
-                        MessageBoxIcon.Error);
-                    return;
-                }
-
-                NotifyCalibrationWindowActionStopped();
-            }
-
             Hide();
             // Hide first: changing ShowInTaskbar while visible recreates the native handle
             // and briefly exposes an unpainted white client area.
@@ -708,7 +792,8 @@ namespace X15FanControl
             const int WmSysCommand = 0x0112;
             const int ScClose = 0xF060;
 
-            if (message.Msg == WmSysCommand &&
+            if (!_uiPreview &&
+                message.Msg == WmSysCommand &&
                 (message.WParam.ToInt64() & 0xFFF0) == ScClose &&
                 !_explicitExitRequested &&
                 !_allowFinalClose)
@@ -719,13 +804,6 @@ namespace X15FanControl
             }
 
             base.WndProc(ref message);
-        }
-
-        private void NotifyCalibrationWindowActionStopped()
-        {
-            const string message = "声学校准已停止并恢复自动，校准期间不能隐藏或最小化窗口。";
-            AppendLog(message);
-            MessageBox.Show(message, "声学校准", MessageBoxButtons.OK, MessageBoxIcon.Information);
         }
 
         private void ExitApplication()
@@ -869,7 +947,6 @@ namespace X15FanControl
             _mainTabs.DrawItem += MainTabsDrawItem;
             _mainTabs.TabPages.Add(BuildDashboardTab());
             _mainTabs.TabPages.Add(BuildProfilesTab());
-            _mainTabs.TabPages.Add(BuildCalibrationTab());
             _mainTabs.TabPages.Add(BuildLogsTab());
 
             Controls.Add(_mainTabs);
@@ -881,8 +958,8 @@ namespace X15FanControl
             Panel panel = new Panel
             {
                 Dock = DockStyle.Top,
-                Height = 82,
-                Padding = new Padding(16, 10, 14, 10),
+                Height = 92,
+                Padding = new Padding(18, 12, 16, 12),
                 BackColor = Color.FromArgb(27, 36, 49)
             };
             TableLayoutPanel layout = new TableLayoutPanel
@@ -892,13 +969,13 @@ namespace X15FanControl
                 RowCount = 1,
                 BackColor = panel.BackColor
             };
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 34));
-            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 66));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 37));
+            layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 63));
 
             Panel brand = new Panel { Dock = DockStyle.Fill, BackColor = panel.BackColor };
             Label title = new Label
             {
-                Text = "X15 风扇控制",
+                Text = "X15 Thermal Control",
                 ForeColor = Color.White,
                 AutoSize = true,
                 Font = new Font("Segoe UI Semibold", 17F),
@@ -906,7 +983,7 @@ namespace X15FanControl
             };
             Label subtitle = new Label
             {
-                Text = "COLORFUL X15 AT 23 / Clevo NP50SNE — x86 EC 控制器",
+                Text = "CPU 功耗 · 双风扇 · GPU 只读遥测",
                 ForeColor = Color.Gainsboro,
                 AutoSize = true,
                 Location = new Point(2, 37)
@@ -939,9 +1016,6 @@ namespace X15FanControl
             StyleButton(ecProbeButton, Color.FromArgb(225, 247, 250), Color.FromArgb(0, 91, 104));
             // 异步探测：同步版会在 UI 线程执行最长约 30 秒的 EC 调用并冻结窗口。
             ecProbeButton.Click += delegate { _ = RunEcProbeAsync(); };
-            Button strategyStatusButton = new Button { Text = "策略状态", Width = 78, Height = 31 };
-            StyleButton(strategyStatusButton, Color.FromArgb(255, 235, 205), Color.FromArgb(115, 70, 0));
-            strategyStatusButton.Click += delegate { if (_mainTabs != null) _mainTabs.SelectedIndex = 0; };
             _modeStatusPanel = new Panel
             {
                 Width = 58,
@@ -969,7 +1043,7 @@ namespace X15FanControl
             };
             actions.Controls.Add(new Label
             {
-                Text = "配置",
+                Text = "策略",
                 ForeColor = Color.Gainsboro,
                 AutoSize = true,
                 Margin = new Padding(0, 11, 2, 0)
@@ -979,7 +1053,6 @@ namespace X15FanControl
             actions.Controls.Add(_applyModeButton);
             actions.Controls.Add(_restoreAutoButton);
             actions.Controls.Add(ecProbeButton);
-            actions.Controls.Add(strategyStatusButton);
             actions.Controls.Add(_modeStatusPanel);
 
             layout.Controls.Add(brand, 0, 0);
@@ -1032,7 +1105,7 @@ namespace X15FanControl
 
         private TabPage BuildDashboardTab()
         {
-            TabPage tab = new TabPage("仪表盘") { BackColor = UiBackground };
+            TabPage tab = new TabPage("总览") { BackColor = UiBackground };
             TableLayoutPanel root = new TableLayoutPanel
             {
                 Dock = DockStyle.Fill,
@@ -1042,8 +1115,8 @@ namespace X15FanControl
                 BackColor = UiBackground
             };
             root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 62));
-            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 56));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 70));
+            root.RowStyles.Add(new RowStyle(SizeType.Absolute, 64));
 
             TableLayoutPanel cards = new TableLayoutPanel
             {
@@ -1111,7 +1184,7 @@ namespace X15FanControl
             AddHardwareStatusText(_hardwareStatusFlow, "°C/s");
 
             FlowLayoutPanel telemetryPanel = new FlowLayoutPanel { Dock = DockStyle.Fill, FlowDirection = FlowDirection.LeftToRight };
-            telemetryPanel.Controls.Add(new Label { Text = "GPU遥测: ", AutoSize = true, ForeColor = Color.DimGray });
+            telemetryPanel.Controls.Add(new Label { Text = "GPU只读遥测: ", AutoSize = true, ForeColor = Color.DimGray });
             _gpuNvidiaStatusLabel = new Label { Text = "等待中…", AutoSize = true, ForeColor = Color.Gray };
             telemetryPanel.Controls.Add(_gpuNvidiaStatusLabel);
             telemetryPanel.Controls.Add(new Label { Text = " | 来源: ", AutoSize = true, ForeColor = Color.DimGray });
@@ -1156,14 +1229,14 @@ namespace X15FanControl
                 Margin = Padding.Empty,
                 Padding = Padding.Empty
             };
-            primary.Controls.Add(CreateStrategyFixedLabel("策略：", 44, true));
+            primary.Controls.Add(CreateStrategyFixedLabel("策略", 46, true));
             _strategyModeValueLabel = CreateStrategyValueLabel(92, true);
             primary.Controls.Add(_strategyModeValueLabel);
-            primary.Controls.Add(CreateStrategyFixedLabel("当前档位：", 70, true));
+            primary.Controls.Add(CreateStrategyFixedLabel("CPU档位", 72, true));
             _strategyTierValueLabel = CreateStrategyValueLabel(105, true);
             primary.Controls.Add(_strategyTierValueLabel);
-            primary.Controls.Add(CreateStrategyFixedLabel("功耗：", 44, true));
-            _strategyPowerValueLabel = CreateStrategyValueLabel(260, true);
+            primary.Controls.Add(CreateStrategyFixedLabel("CPU功耗", 72, true));
+            _strategyPowerValueLabel = CreateStrategyValueLabel(285, true);
             primary.Controls.Add(_strategyPowerValueLabel);
 
             FlowLayoutPanel secondary = new FlowLayoutPanel
@@ -1175,17 +1248,17 @@ namespace X15FanControl
                 Margin = Padding.Empty,
                 Padding = Padding.Empty
             };
-            secondary.Controls.Add(CreateStrategyFixedLabel("原因：", 44, false));
-            _strategyReasonValueLabel = CreateStrategyValueLabel(315, false);
+            secondary.Controls.Add(CreateStrategyFixedLabel("状态", 46, false));
+            _strategyReasonValueLabel = CreateStrategyValueLabel(360, false);
             secondary.Controls.Add(_strategyReasonValueLabel);
-            secondary.Controls.Add(CreateStrategyFixedLabel("后端：", 44, false));
-            _strategyBackendValueLabel = CreateStrategyValueLabel(155, false);
+            secondary.Controls.Add(CreateStrategyFixedLabel("CPU后端", 72, false));
+            _strategyBackendValueLabel = CreateStrategyValueLabel(135, false);
             secondary.Controls.Add(_strategyBackendValueLabel);
-            secondary.Controls.Add(CreateStrategyFixedLabel("CPU：", 38, false));
+            secondary.Controls.Add(CreateStrategyFixedLabel("CPU负载", 72, false));
             _strategyCpuValueLabel = CreateStrategyValueLabel(48, false);
             secondary.Controls.Add(_strategyCpuValueLabel);
-            secondary.Controls.Add(CreateStrategyFixedLabel("GPU：", 38, false));
-            _strategyGpuValueLabel = CreateStrategyValueLabel(48, false);
+            secondary.Controls.Add(CreateStrategyFixedLabel("GPU只读", 72, false));
+            _strategyGpuValueLabel = CreateStrategyValueLabel(88, false);
             secondary.Controls.Add(_strategyGpuValueLabel);
 
             panel.Controls.Add(secondary);

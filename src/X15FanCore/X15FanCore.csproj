@@ -14,4 +14,7 @@
     <Reference Include="System.IO.Compression.FileSystem" />
     <Reference Include="System.Xml" />
   </ItemGroup>
+  <ItemGroup>
+    <InternalsVisibleTo Include="X15FanCore.Tests" />
+  </ItemGroup>
 </Project>
