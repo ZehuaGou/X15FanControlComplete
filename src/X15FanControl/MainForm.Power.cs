@@ -429,7 +429,11 @@ namespace X15FanControl
                     bool applied = windowsApplied || xtuApplied;
                     // 只有当前 generation 才能发布状态：旧请求完成后不得覆盖
                     // 新档位，也不得发布过期的 xtuConfirmed/backendName。
-                    if (generation != _adaptiveApplyGeneration || _adaptiveDesiredTier != tier)
+                    if (!AdaptivePowerApplyGuard.CanPublish(
+                            generation,
+                            _adaptiveApplyGeneration,
+                            tier,
+                            _adaptiveEffectiveTier))
                     {
                         AppendLog("AUTO_TIER power_apply_superseded tier=" + GetAdaptiveTierName(tier));
                         return;

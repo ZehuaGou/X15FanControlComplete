@@ -127,11 +127,11 @@ The four tiers (Quiet / Daily / Code / Heavy) are selected from 8-second CPU loa
 | Quiet → Daily | CPU ≥ 12% |
 | Daily → Code | CPU ≥ 25% |
 | Code → Heavy | CPU ≥ 50% |
-| Heavy → Code | avg CPU ≤ 25%, peak < 60%, 45 s dwell |
-| Code → Daily | avg CPU ≤ 15%, peak < 40%, 60 s dwell |
-| Daily → Quiet | avg CPU ≤ 8%, peak < 30%, 90 s dwell, plus thermal gate (CPU < 85 °C, rise ≤ 0.5 °C/s) |
+| Heavy → Code | avg CPU ≤ 25%, peak < 60%, 60 s dwell |
+| Code → Daily | avg CPU ≤ 17%, peak < 40%, 120 s dwell |
+| Daily → Quiet | avg CPU ≤ 8%, peak < 30%, 120 s dwell, plus thermal gate (CPU < 85 °C, rise ≤ 0.5 °C/s) |
 
-**Compile fast-track**: sustained CPU ≥ 80% (build/compile load) pierces the 20 s minimum tier hold and compresses the upshift dwell to 3 seconds, so a compile reaches Heavy (55 W / 100% CPU) within seconds instead of ~45 s. Downshift dwells are never compressed. GPU high load does not raise the CPU power tier; in a GPU-heavy game with low CPU load the CPU tier stays Daily while the GPU fan responds via its own thermal demand path.
+**Compile fast-track**: sustained CPU ≥ 80% (build/compile load) pierces the 20 s minimum tier hold, but still requires the 12-second strong-evidence dwell for each adjacent upshift. Downshift dwells are never compressed. GPU high load does not raise the CPU power tier; in a GPU-heavy game with low CPU load the CPU tier stays Daily while the GPU fan responds via its own thermal demand path.
 
 > The thresholds were calibrated against a 23-hour usage trace on the target machine (84,139 one-second samples). See `src/X15FanCore/Control/AdaptivePowerTier.cs` for the data notes.
 

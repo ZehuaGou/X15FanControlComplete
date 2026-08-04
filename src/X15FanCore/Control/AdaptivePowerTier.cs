@@ -141,6 +141,10 @@ namespace X15FanCore.Control
         // (84,139 one-second samples, 2026-07-31/08-01): CPU utilization sits
         // in 0-5% (7%), 5-10% (22%), 10-15% (22%), 15-20% (20%), 20-35%
         // (25%), 35-50% (4%), 50%+ (0.6%).
+        // A later overnight trace (2026-08-04) showed a stable resident-load
+        // baseline of 15.0-15.7%. Replaying the 15/16/17/18/19/20 candidates
+        // selected 17% as the smallest robust Code -> Daily threshold: 16%
+        // was marginal, while 18% admitted earlier interactive quiet windows.
         //
         // 架构收束 (2026-08-02): CPU requested tier 只由 CPU 利用率、CPU
         // 实际功耗(有安全只读来源后接入)、CPU 温度、持续时间决定。GPU
@@ -152,7 +156,7 @@ namespace X15FanCore.Control
 
         // Downshift uses averages with hysteresis instead of the instantaneous
         // thresholds used by the previous implementation.
-        public const double CodeToDailyCpuAveragePercent = 15;
+        public const double CodeToDailyCpuAveragePercent = 17;
         public const double HeavyToCodeCpuAveragePercent = 25;
 
         // Recent-peak gates for downshift: a load spike inside the peak window
@@ -264,6 +268,17 @@ namespace X15FanCore.Control
         public AdaptiveTierDiagnostics Diagnostics
         {
             get { return _diagnostics; }
+        }
+
+        private double EffectiveCodeToDailyCpuAveragePercent
+        {
+            get
+            {
+                double configured = _settings.CodeToDailyCpuAveragePercent;
+                return configured >= 15.0 && configured <= 20.0
+                    ? configured
+                    : CodeToDailyCpuAveragePercent;
+            }
         }
 
         public void ForceTier(AdaptivePowerTier tier, string reason)
@@ -378,7 +393,7 @@ namespace X15FanCore.Control
                                 average.AverageCpu <= DailyToQuietCpuAveragePercent &&
                                  recent.MaximumCpu < QuietDownshiftMaxCpuPeakPercent;
             bool codeToDaily =
-                               average.AverageCpu <= CodeToDailyCpuAveragePercent &&
+                               average.AverageCpu <= EffectiveCodeToDailyCpuAveragePercent &&
                                recent.MaximumCpu < CodeDownshiftMaxCpuPeakPercent;
             bool heavyToCode =
                                average.AverageCpu <= HeavyToCodeCpuAveragePercent &&

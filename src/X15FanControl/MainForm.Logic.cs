@@ -23,6 +23,7 @@ namespace X15FanControl
             {
                 DisposeEc();
                 Interlocked.Exchange(ref _ecFaulted, 0);
+                _ecFaultDetail = "";
                 string dllPath = Path.Combine(AppDomain.CurrentDomain.BaseDirectory, "ClevoEcInfo.dll");
                 _ecQueue = new EcAccessQueue(dllPath);
                 if (!_ecQueue.Ready.Wait(10000) || !_ecQueue.IsReady)
@@ -40,8 +41,6 @@ namespace X15FanControl
             }
         }
 
-        private const int EcOperationTimeoutMilliseconds = 5000;
-
         private bool IsEcReady()
         {
             return Volatile.Read(ref _ecFaulted) == 0 && _ecQueue != null && _ecQueue.IsReady;
@@ -51,8 +50,76 @@ namespace X15FanControl
         {
             if (Interlocked.Exchange(ref _ecFaulted, 1) == 0)
             {
+                _ecFaultDetail = operationName + " 硬超时 " + elapsedMilliseconds + "ms";
                 try { _ecQueue?.Fault(); } catch { }
-                AppendLog("EC队列已熔断：" + operationName + " 超时 " + elapsedMilliseconds + "ms；停止后续EC请求，交由看门狗保护。");
+                AppendLog("EC队列已熔断：" + _ecFaultDetail + "；停止后续EC请求，交由看门狗保护。当前进程不会强行重建仍可能阻塞的原生EC调用。");
+                InvalidateEcDashboard(_ecFaultDetail);
+            }
+        }
+
+        private void InvalidateEcDashboard(string detail)
+        {
+            lock (_latestLock)
+            {
+                _latestSnapshot = null;
+                _latestDecision = null;
+                _lastSnapshot = null;
+            }
+
+            if (!IsHandleCreated || IsDisposed || _closing)
+                return;
+
+            try
+            {
+                BeginInvoke(new Action(() =>
+                {
+                    if (_closing || IsDisposed) return;
+                    SetLabelText(_hardwareStatusLabel, "EC 已熔断：实时数据已停止（请退出程序后重新启动）");
+                    SetLabelText(_cpuEcRemoteStatusValueLabel, "—");
+                    SetLabelText(_cpuEcLocalStatusValueLabel, "—");
+                    SetLabelText(_gpuEcRemoteStatusValueLabel, "—");
+                    SetLabelText(_gpuEcLocalStatusValueLabel, "—");
+                    SetLabelText(_cpuRpmStatusValueLabel, "—");
+                    SetLabelText(_gpuRpmStatusValueLabel, "—");
+                    SetLabelText(_temperatureRiseStatusValueLabel, "—");
+                    SetLabelText(_cpuTempLabel, "—");
+                    SetLabelText(_cpuFilteredLabel, "—");
+                    SetLabelText(_cpuDutyLabel, "—");
+                    SetLabelText(_cpuTargetLabel, "—");
+                    SetLabelText(_cpuRpmLabel, "—");
+                    SetLabelText(_gpuTempLabel, "—");
+                    SetLabelText(_gpuFilteredLabel, "—");
+                    SetLabelText(_gpuDutyLabel, "—");
+                    SetLabelText(_gpuTargetLabel, "—");
+                    SetLabelText(_gpuRpmLabel, "—");
+                    SetLabelText(_gpuNvidiaUtilLabel, "—");
+                    SetLabelText(_gpuNvidiaPowerLabel, "—");
+                    SetLabelText(_gpuNvidiaPStateLabel, "—");
+                    SetLabelText(_gpuNvidiaSourceLabel, "—");
+                    SetLabelText(_gpuNvidiaStatusLabel, "界面数据已停止");
+                    if (_gpuNvidiaStatusLabel != null)
+                        _gpuNvidiaStatusLabel.ForeColor = Color.DarkRed;
+                    SetLabelText(_strategyReasonValueLabel, "EC 硬超时：" + detail + "；实时数据已停止，请退出程序后重新启动");
+                    SetLabelText(_strategyCpuValueLabel, "—");
+                    SetLabelText(_strategyGpuValueLabel, "—");
+                    if (_cpuCardBox != null)
+                    {
+                        _cpuCardBox.Text = "CPU  [EC 数据不可用]";
+                        _cpuCardBox.ForeColor = Color.Gray;
+                    }
+                    if (_gpuCardBox != null)
+                    {
+                        _gpuCardBox.Text = "GPU  [EC 数据不可用]";
+                        _gpuCardBox.ForeColor = Color.Gray;
+                    }
+                    SetHardwareStatusColor(Color.DarkRed);
+                    _adaptiveLastReason = "EC 硬超时，实时数据已停止；退出程序后重新启动";
+                    UpdateModeStatus();
+                }));
+            }
+            catch (InvalidOperationException)
+            {
+                // The form is already closing; no stale UI can remain visible.
             }
         }
 
@@ -65,7 +132,7 @@ namespace X15FanControl
             bool completed = false;
             try
             {
-                T result = _ecQueue.Execute(name, operation, EcOperationTimeoutMilliseconds, CancellationToken.None);
+                T result = _ecQueue.Execute(name, operation, EcOperationTimeoutPolicy.HardTimeoutMilliseconds, CancellationToken.None);
                 completed = true;
                 return result;
             }
@@ -77,7 +144,7 @@ namespace X15FanControl
             finally
             {
                 if (completed) RecordEcActivity();
-                LogSlowEcOperation(name, stopwatch.ElapsedMilliseconds);
+                LogEcOperationDuration(name, stopwatch.ElapsedMilliseconds, completed);
             }
         }
 
@@ -88,12 +155,12 @@ namespace X15FanControl
             Task<T> operationTask = _ecQueue.ExecuteAsync(name, operation, token, priority);
             Task completed = await Task.WhenAny(
                 operationTask,
-                Task.Delay(EcOperationTimeoutMilliseconds, CancellationToken.None)).ConfigureAwait(false);
+                Task.Delay(EcOperationTimeoutPolicy.HardTimeoutMilliseconds, CancellationToken.None)).ConfigureAwait(false);
             if (completed != operationTask)
             {
                 MarkEcQueueFault(name, stopwatch.ElapsedMilliseconds);
-                LogSlowEcOperation(name, stopwatch.ElapsedMilliseconds);
-                throw new TimeoutException(name + " exceeded " + EcOperationTimeoutMilliseconds + "ms.");
+                LogEcOperationDuration(name, stopwatch.ElapsedMilliseconds, false);
+                throw new TimeoutException(name + " exceeded hard EC deadline " + EcOperationTimeoutPolicy.HardTimeoutMilliseconds + "ms.");
             }
 
             bool operationCompleted = false;
@@ -111,14 +178,21 @@ namespace X15FanControl
             finally
             {
                 if (operationCompleted) RecordEcActivity();
-                LogSlowEcOperation(name, stopwatch.ElapsedMilliseconds);
+                LogEcOperationDuration(name, stopwatch.ElapsedMilliseconds, operationCompleted);
             }
         }
 
-        private void LogSlowEcOperation(string name, long elapsedMilliseconds)
+        private void LogEcOperationDuration(string name, long elapsedMilliseconds, bool operationCompleted)
         {
-            if (elapsedMilliseconds >= 1000)
+            if (operationCompleted && EcOperationTimeoutPolicy.IsSlow(elapsedMilliseconds))
+            {
+                AppendLog("EC操作缓慢但已完成：" + name + " " + elapsedMilliseconds +
+                          "ms；未熔断（硬超时阈值 " + EcOperationTimeoutPolicy.HardTimeoutMilliseconds + "ms）。");
+            }
+            else if (elapsedMilliseconds >= 1000)
+            {
                 AppendLog("EC阶段耗时：" + name + " " + elapsedMilliseconds + "ms");
+            }
         }
 
         private int EcGetCount()
@@ -230,7 +304,12 @@ namespace X15FanControl
             {
                 if (!IsEcReady())
                 {
-                    MessageBox.Show("EC 接口不可用，无法启动活动模式。", "X15 风扇控制", MessageBoxButtons.OK, MessageBoxIcon.Error);
+                    string ecMessage = Volatile.Read(ref _ecFaulted) != 0
+                        ? "EC 已因硬超时进入安全熔断，当前实时数据已经停止。\r\n\r\n" +
+                          "原生 EC 调用无法安全强制中止，因此本进程不会冒险重新初始化。请从托盘完整退出程序，再重新启动后进入 Active。\r\n\r\n" +
+                          "故障：" + (_ecFaultDetail ?? "未知")
+                        : "EC 尚未初始化或接口不可用，无法启动活动模式。请完整退出程序后重新启动；不要同时运行其他风扇控制器。";
+                    MessageBox.Show(ecMessage, "X15 风扇控制", MessageBoxButtons.OK, MessageBoxIcon.Error);
                     requestedMode = RunMode.ReadOnly;
                 }
                 else
@@ -306,6 +385,8 @@ namespace X15FanControl
             }
 
             _runMode = requestedMode;
+            if (_runMode == RunMode.Active)
+                Interlocked.Exchange(ref _overrideFallbackHandling, 0);
             if (_runMode != RunMode.Active)
                 RestoreAdaptivePowerPolicy();
             lock (_engineLock) { _engine?.Reset(); }
@@ -402,10 +483,19 @@ namespace X15FanControl
                     lock (_engineLock)
                     {
                         decision = _engine.Update(snapshot);
-                        // 普通快照已经包含两个通道的 duty 字节，直接用它确认
-                        // 上一周期写入并检测外部覆盖，不再追加专项 EC 读取。
-                        cpuReadback = _engine.ObserveCpuReadback(snapshot.CpuDutyPercent);
-                        gpuReadback = _engine.ObserveGpuReadback(snapshot.GpuDutyPercent);
+                        // 只有 Active 真正写过 EC，普通快照才可作为写入确认。
+                        // ReadOnly/Simulation 下的 OEM duty 变化绝不是对本程序
+                        // 的外部覆盖；在这些模式中只发布被动观测值。
+                        if (_runMode == RunMode.Active)
+                        {
+                            cpuReadback = _engine.ObserveCpuReadback(snapshot.CpuDutyPercent, snapshot.TimestampUtc);
+                            gpuReadback = _engine.ObserveGpuReadback(snapshot.GpuDutyPercent, snapshot.TimestampUtc);
+                        }
+                        else
+                        {
+                            cpuReadback = CreatePassiveReadback(snapshot.CpuDutyPercent);
+                            gpuReadback = CreatePassiveReadback(snapshot.GpuDutyPercent);
+                        }
                     }
 
                     PublishSnapshotReadback(decision, snapshot, cpuReadback, gpuReadback);
@@ -514,9 +604,11 @@ namespace X15FanControl
                 }
                 finally
                 {
-                    if (cycleStopwatch.ElapsedMilliseconds > 5000)
+                    if (cycleStopwatch.ElapsedMilliseconds > EcOperationTimeoutPolicy.SlowWarningMilliseconds)
                     {
-                        AppendLog("控制循环周期过长：" + cycleStopwatch.ElapsedMilliseconds + "ms；已接近看门狗超时阈值。" );
+                        AppendLog("控制循环周期较慢：" + cycleStopwatch.ElapsedMilliseconds +
+                                  "ms；EC 硬超时阈值 " + EcOperationTimeoutPolicy.HardTimeoutMilliseconds +
+                                  "ms，看门狗心跳阈值 30s。" );
                     }
                     Interlocked.Exchange(ref _controlLoopGuard, 0);
                 }
@@ -609,6 +701,7 @@ namespace X15FanControl
 
             // 所有检查通过，切换Active（不弹确认框）
             _runMode = RunMode.Active;
+            Interlocked.Exchange(ref _overrideFallbackHandling, 0);
             lock (_engineLock) { _engine?.Reset(); }
             _modeCombo.SelectedItem = _runMode;
             UpdateModeStatus();
@@ -678,8 +771,22 @@ namespace X15FanControl
                 decision.Gpu.State = ControlState.ExternalOverride;
         }
 
+        private static FanWriteReadbackStatus CreatePassiveReadback(double observedPercent)
+        {
+            return new FanWriteReadbackStatus
+            {
+                HasExpectedWrite = false,
+                ExpectedPercent = 0,
+                ObservedPercent = observedPercent,
+                Verified = false,
+                ExternalOverrideDetected = false
+            };
+        }
+
         private void RequestExternalOverrideFallback(string channelName)
         {
+            if (_runMode != RunMode.Active)
+                return;
             if (Interlocked.Exchange(ref _overrideFallbackHandling, 1) != 0)
                 return;
 

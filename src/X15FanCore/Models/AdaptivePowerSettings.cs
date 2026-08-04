@@ -34,6 +34,10 @@ namespace X15FanCore.Models
             UpshiftEvidenceWindowSeconds = 8;
             DownshiftAverageWindowSeconds = 30;
             RecentPeakWindowSeconds = 15;
+            // Target-machine calibration (2026-08-04): the observed resident
+            // background baseline is about 15-16%. 17% leaves margin to return
+            // Code -> Daily without overlapping the 25% upshift gate.
+            CodeToDailyCpuAveragePercent = 17.0;
             // 声学/热治理参数（候选值待硬件标定）：
             // 温升率超过该值(°C/s)时风扇可突破声学软上限（快速升温安全）。
             FastRiseBreakthroughCPerSecond = 1.0;
@@ -159,6 +163,10 @@ namespace X15FanCore.Models
          Description("温度恢复余量且温升率 <= 0 并持续该时长后辅助退出（滞回避免反复开关）。")]
         public int CrossFanAssistExitStableSeconds { get; set; }
 
+        [DataMember(Order = 32), DisplayName("代码→日常 CPU 均值 (%)"), Category("自动策略"),
+         Description("30 秒 CPU 均值低于此阈值且通过近期峰值门禁时，累计代码转日常的降档证据。")]
+        public double CodeToDailyCpuAveragePercent { get; set; }
+
         public void Normalize()
         {
             // 功耗参数锁定为安全预设（与桥接白名单共享定义）：不允许通过
@@ -187,6 +195,10 @@ namespace X15FanCore.Models
             UpshiftEvidenceWindowSeconds = Clamp(UpshiftEvidenceWindowSeconds <= 0 ? 8 : UpshiftEvidenceWindowSeconds, 2, 60);
             DownshiftAverageWindowSeconds = Clamp(DownshiftAverageWindowSeconds <= 0 ? 30 : DownshiftAverageWindowSeconds, 5, 300);
             RecentPeakWindowSeconds = Clamp(RecentPeakWindowSeconds <= 0 ? 15 : RecentPeakWindowSeconds, 3, 120);
+            CodeToDailyCpuAveragePercent = Clamp(
+                CodeToDailyCpuAveragePercent <= 0 ? 17.0 : CodeToDailyCpuAveragePercent,
+                15.0,
+                20.0);
             if (FastRiseBreakthroughCPerSecond <= 0) FastRiseBreakthroughCPerSecond = 1.0;
             ThermalSaturationDwellSeconds = Clamp(ThermalSaturationDwellSeconds <= 0 ? 20 : ThermalSaturationDwellSeconds, 5, 300);
             RecoveryDwellSeconds = Clamp(RecoveryDwellSeconds <= 0 ? 90 : RecoveryDwellSeconds, 10, 900);
@@ -202,6 +214,11 @@ namespace X15FanCore.Models
         }
 
         private static int Clamp(int value, int minimum, int maximum)
+        {
+            return value < minimum ? minimum : value > maximum ? maximum : value;
+        }
+
+        private static double Clamp(double value, double minimum, double maximum)
         {
             return value < minimum ? minimum : value > maximum ? maximum : value;
         }

@@ -177,7 +177,15 @@ namespace X15FanCore.Control
                 config.AdaptivePower = new AdaptivePowerSettings();
                 changed = true;
             }
+            double codeToDailyThresholdBeforeNormalize =
+                config.AdaptivePower.CodeToDailyCpuAveragePercent;
             config.AdaptivePower.Normalize();
+            if (Math.Abs(
+                    config.AdaptivePower.CodeToDailyCpuAveragePercent -
+                    codeToDailyThresholdBeforeNormalize) > 0.001)
+            {
+                changed = true;
+            }
             if (config.CsvRetentionDays <= 0) { config.CsvRetentionDays = 7; changed = true; }
 
             // 标定迁移：CPU 一级紧急温度从 87°C 调整为 89°C。87°C 在这台

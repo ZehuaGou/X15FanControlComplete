@@ -227,9 +227,19 @@ namespace X15FanCore.Control
             return _cpu.ObserveEcReadback(readbackPercent);
         }
 
+        public FanWriteReadbackStatus ObserveCpuReadback(double readbackPercent, DateTime timestampUtc)
+        {
+            return _cpu.ObserveEcReadback(readbackPercent, timestampUtc);
+        }
+
         public FanWriteReadbackStatus ObserveGpuReadback(double readbackPercent)
         {
             return _gpu.ObserveEcReadback(readbackPercent);
+        }
+
+        public FanWriteReadbackStatus ObserveGpuReadback(double readbackPercent, DateTime timestampUtc)
+        {
+            return _gpu.ObserveEcReadback(readbackPercent, timestampUtc);
         }
     }
 

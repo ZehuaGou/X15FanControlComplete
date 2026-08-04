@@ -37,6 +37,10 @@ namespace X15FanCore.Control
         private double _lastWriteVerificationTarget;
         private bool _pendingWriteVerification;
         private bool _lastWriteVerified;
+        private DateTime? _externalMismatchSinceUtc;
+        private DateTime _lastExternalMismatchSampleUtc;
+        private const double ExternalOverrideRequiredSeconds = 5.0;
+        private const double ExternalOverrideMaximumSampleGapSeconds = 3.0;
 
         // Stable zone hysteresis
         private bool _inStableZone;
@@ -93,6 +97,8 @@ namespace X15FanCore.Control
             _lastWriteVerificationTarget = -1;
             _pendingWriteVerification = false;
             _lastWriteVerified = false;
+            _externalMismatchSinceUtc = null;
+            _lastExternalMismatchSampleUtc = DateTime.MinValue;
             _inStableZone = false;
             UpdateStableZoneThresholds();
         }
@@ -319,6 +325,14 @@ namespace X15FanCore.Control
 
         public void MarkWritten(int writtenPercent, DateTime timestampUtc)
         {
+            // A ramping controller can issue a different target every sample.
+            // Mismatches against different targets are not continuous evidence
+            // that another controller is overriding one specific write.
+            if (_lastWriteVerificationTarget < 0 ||
+                Math.Abs(writtenPercent - _lastWriteVerificationTarget) > 0.5)
+            {
+                ResetExternalOverrideEvidence();
+            }
             _lastWritten = writtenPercent;
             _lastWriteUtc = timestampUtc;
             _pendingWriteVerification = true;
@@ -326,12 +340,12 @@ namespace X15FanCore.Control
             _lastWriteVerified = false;
         }
 
-        public FanWriteReadbackStatus ObserveEcReadback(double readbackPercent)
+        public FanWriteReadbackStatus ObserveEcReadback(double readbackPercent, DateTime timestampUtc)
         {
             _ecLastReadbackPercent = readbackPercent;
             bool hasExpectedWrite = _initialized && _lastWritten >= 0;
             bool verified = hasExpectedWrite && Math.Abs(readbackPercent - _lastWritten) <= 2.0;
-            bool overridden = hasExpectedWrite && CheckExternalOverride(readbackPercent);
+            bool overridden = hasExpectedWrite && CheckExternalOverride(readbackPercent, timestampUtc);
 
             if (verified)
                 _pendingWriteVerification = false;
@@ -347,9 +361,14 @@ namespace X15FanCore.Control
             };
         }
 
+        public FanWriteReadbackStatus ObserveEcReadback(double readbackPercent)
+        {
+            return ObserveEcReadback(readbackPercent, DateTime.UtcNow);
+        }
+
         public int ConsecutiveMismatchCount => _consecutiveMismatchCount;
 
-        public bool CheckExternalOverride(double currentReadbackPercent)
+        public bool CheckExternalOverride(double currentReadbackPercent, DateTime timestampUtc)
         {
             if (!_initialized || _lastWritten < 0)
                 return false;
@@ -357,18 +376,42 @@ namespace X15FanCore.Control
             double diff = Math.Abs(currentReadbackPercent - _lastWritten);
             if (diff > 3.0)
             {
-                _consecutiveMismatchCount++;
+                bool discontinuous = !_externalMismatchSinceUtc.HasValue ||
+                    _lastExternalMismatchSampleUtc == DateTime.MinValue ||
+                    timestampUtc <= _lastExternalMismatchSampleUtc ||
+                    (timestampUtc - _lastExternalMismatchSampleUtc).TotalSeconds >
+                        ExternalOverrideMaximumSampleGapSeconds;
 
-                // Only a genuinely continuous mismatch proves that another
-                // controller is taking ownership.  Historical, isolated EC
-                // read glitches must never accumulate into a false fallback.
-                return _consecutiveMismatchCount >= 3;
+                if (discontinuous)
+                {
+                    _externalMismatchSinceUtc = timestampUtc;
+                    _consecutiveMismatchCount = 1;
+                }
+                else
+                {
+                    _consecutiveMismatchCount++;
+                }
+                _lastExternalMismatchSampleUtc = timestampUtc;
+
+                // Require both repeated samples and a real-time dwell against
+                // one stable write target.  Three 500ms startup frames only
+                // prove EC response latency, not an external controller.
+                return _consecutiveMismatchCount >= 3 &&
+                    (timestampUtc - _externalMismatchSinceUtc.Value).TotalSeconds >=
+                        ExternalOverrideRequiredSeconds;
             }
 
             // A matching ordinary control snapshot breaks continuity.
-            _consecutiveMismatchCount = 0;
+            ResetExternalOverrideEvidence();
 
             return false;
+        }
+
+        private void ResetExternalOverrideEvidence()
+        {
+            _consecutiveMismatchCount = 0;
+            _externalMismatchSinceUtc = null;
+            _lastExternalMismatchSampleUtc = DateTime.MinValue;
         }
 
         public bool PendingWriteVerification => _pendingWriteVerification;

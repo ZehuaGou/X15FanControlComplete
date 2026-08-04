@@ -86,6 +86,7 @@ namespace X15FanControl
         private int _cpuZeroDutyReadCount;
         private int _gpuZeroDutyReadCount;
         private int _ecFaulted;
+        private string _ecFaultDetail = "";
         private int _watchdogFailureHandling;
         private bool _closing;
         private bool _allowFinalClose;
