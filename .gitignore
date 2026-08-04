@@ -27,3 +27,18 @@ dist/ClevoEcInfo.dll
 # Session/evidence directories (not for public repo)
 .omo/
 artifacts/
+
+# Dev/test artifacts and process docs (not for public repo)
+.github/
+tests/
+tools/
+scripts/
+*.bat
+*.ps1
+docs/ARCHITECTURE_CONSOLIDATION_20260802.md
+docs/CONTROL_CENTER_CPU_GPU_MECHANISM_AUDIT.md
+docs/CPU_GPU_POWER_CAPABILITY_AUDIT.md
+docs/HARDWARE_ACCEPTANCE_PLAN.md
+docs/SAFE_TEST_PLAN.md
+docs/SCENARIO_TEST_RESULTS.md
+docs/SOURCE_ANALYSIS.md
